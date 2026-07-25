@@ -43,3 +43,6 @@ ZERO_SPEED_TIMEOUT = 120
 
 # --- 文件过滤 --- 迅雷下载时过滤非视频和nfo和字幕文件
 FILTER_FILES = true
+
+# --- 调试模式 --- 开启后打印所有API请求/响应详情，用于排查问题
+DEBUG = false
