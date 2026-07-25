@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  qbit2xunlei:
+    build: .
+    container_name: qbit2xunlei
+    restart: unless-stopped
+    network_mode: host  # 需要访问局域网 NAS 和 qBit
+    volumes:
+      - ./config.ini:/app/config.ini:ro
+      - ./data:/app/data
+    environment:
+      - CONFIG_PATH=/app/config.ini

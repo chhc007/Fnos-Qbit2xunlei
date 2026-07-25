@@ -1,0 +1,35 @@
+# qBit → 迅雷 自动转存配置文件
+# 复制此文件为 config.ini 并填写实际值
+
+[qbittorrent]
+# qBittorrent Web UI 地址
+QB_HOST = http://192.168.1.100:8080
+QB_USER = admin
+QB_PASS = adminadmin
+
+[nas]
+# NAS (飞牛 fnOS) 配置
+NAS_HOST = 192.168.123.146
+NAS_PORT = 5666
+NAS_USER = shield
+NAS_PASS = shield
+
+# 迅雷下载路径（留空使用迅雷默认路径）
+# 示例: /存储空间5/shield的文件/影视库/下载/迅雷下载影视
+XUNLEI_DOWNLOAD_PATH =
+
+[general]
+# 检查间隔（秒）
+CHECK_INTERVAL = 30
+
+# 触发转存的标签名
+TARGET_LABEL = 迅雷
+
+# 删除 qBit 任务时是否同时删除文件
+DELETE_FILES = false
+
+# 是否等待迅雷下载完成后再删除 qBit 任务
+WAIT_COMPLETION = false
+
+# 最大同时转存任务数
+MAX_CONCURRENT = 3
