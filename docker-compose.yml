@@ -1,12 +1,8 @@
 services:
   fnosqbit2xunlei:
-    build: .
+    #build: .
     container_name: fnosqbit2xunlei
     restart: unless-stopped
     volumes:
-      - ./config:/app/config
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./config:/app/config #你的配置文件必须挂载到本地目录
+
