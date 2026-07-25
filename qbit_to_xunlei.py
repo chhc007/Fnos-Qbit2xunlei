@@ -96,6 +96,13 @@ ZERO_SPEED_TIMEOUT = config.getint("general", "ZERO_SPEED_TIMEOUT", fallback=10)
 # 文件过滤
 FILTER_FILES = config.getboolean("general", "FILTER_FILES", fallback=False)
 
+# 调试模式
+DEBUG = config.getboolean("general", "DEBUG", fallback=False)
+
+if DEBUG:
+    logging.getLogger().setLevel(logging.DEBUG)
+    log.debug("调试模式已开启")
+
 log.info("✅ 配置加载完成")
 log.info(f"  qBit: {QB_HOST}")
 log.info(f"  NAS:  {NAS_HOST}:{NAS_PORT}")
@@ -108,6 +115,7 @@ if ZERO_SPEED_ENABLED:
 else:
     log.info("  0速度超时: 已禁用")
 log.info(f"  文件过滤: {'启用' if FILTER_FILES else '禁用'}")
+log.info(f"  调试模式: {'开启' if DEBUG else '关闭'}")
 
 
 # ============ qBittorrent API ============
@@ -122,14 +130,22 @@ class QBitClient:
 
     def _login(self, user: str, password: str):
         url = f"{self.host}/api/v2/auth/login"
+        if DEBUG:
+            log.debug(f"[DEBUG] qBit 登录 POST {url}")
         resp = self.session.post(url, data={"username": user, "password": password}, verify=False)
+        if DEBUG:
+            log.debug(f"[DEBUG] qBit 登录响应: HTTP {resp.status_code}, body={resp.text[:200]}")
         if resp.status_code not in (200, 204):
             raise Exception(f"qBit 登录失败 (HTTP {resp.status_code})，请检查用户名密码")
         log.info("qBit 登录成功")
 
     def get_torrents(self) -> list:
         url = f"{self.host}/api/v2/torrents/info"
+        if DEBUG:
+            log.debug(f"[DEBUG] qBit GET {url}")
         resp = self.session.get(url, verify=False)
+        if DEBUG:
+            log.debug(f"[DEBUG] qBit torrents 响应: HTTP {resp.status_code}, {len(resp.json())} 个任务")
         resp.raise_for_status()
         return resp.json()
 
@@ -162,7 +178,10 @@ class QBitClient:
     def get_speed(self, hash_: str) -> int:
         """获取任务当前下载速度（bytes/s）"""
         t = self.get_torrent(hash_)
-        return t.get("dlspeed", 0)
+        speed = t.get("dlspeed", 0)
+        if DEBUG:
+            log.debug(f"[DEBUG] qBit 速度 {hash_[:8]}: {speed} bytes/s ({fmt_speed(speed)})")
+        return speed
 
     def delete_torrent(self, hash_: str, delete_files: bool = False):
         url = f"{self.host}/api/v2/torrents/delete"
@@ -222,6 +241,28 @@ def fmt_duration(seconds: int) -> str:
         return f"{seconds // 60}m{seconds % 60}s"
     else:
         return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+
+
+def find_xunlei_task(xl_tasks, qbit_hash, qbit_name):
+    """
+    在迅雷任务列表中找到匹配的任务。
+    优先用 torrent hash 匹配（稳定），兜底用名称匹配。
+    """
+    # 1. Hash 匹配：从迅雷任务的 params.url 中提取 btih
+    for task in xl_tasks:
+        params = task.get("params", {})
+        url = params.get("url", "") if isinstance(params, dict) else ""
+        match = re.search(r'btih:([a-fA-F0-9]{40})', url, re.IGNORECASE)
+        if match and match.group(1).lower() == qbit_hash.lower():
+            return task
+
+    # 2. 名称兜底匹配
+    for task in xl_tasks:
+        tname = task.get("file_name", task.get("name", ""))
+        if tname and qbit_name and qbit_name in tname:
+            return task
+
+    return None
 
 
 # ============ 迅雷任务状态检查 ============
@@ -417,6 +458,7 @@ def main():
         nas_pass=NAS_PASS,
         download_path=XUNLEI_DOWNLOAD_PATH,
         filter_files=FILTER_FILES,
+        debug=DEBUG,
     )
 
     log.info("正在初始化迅雷下载器...")
@@ -541,14 +583,9 @@ def main():
                     log.info(f"等待 {INITIAL_WAIT}s 观察迅雷是否开始下载...")
                     time.sleep(INITIAL_WAIT)
 
-                    # 通过名称查找迅雷任务状态
+                    # 通过 hash/名称查找迅雷任务状态
                     xl_tasks = xunlei.list_tasks("all")
-                    xl_task = None
-                    for task in xl_tasks:
-                        tname = task.get("file_name", task.get("name", ""))
-                        if tname and t["name"] and t["name"] in tname:
-                            xl_task = task
-                            break
+                    xl_task = find_xunlei_task(xl_tasks, t["hash"], t["name"])
 
                     if xl_task:
                         phase = xl_task.get("phase", "")
@@ -572,34 +609,27 @@ def main():
                         log.info("未找到对应迅雷任务，等待更多时间...")
                         time.sleep(10)
                         xl_tasks = xunlei.list_tasks("all")
-                        for task in xl_tasks:
-                            tname = task.get("file_name", task.get("name", ""))
-                            if tname and t["name"] and t["name"] in tname:
-                                xl_task = task
-                                break
+                        xl_task = find_xunlei_task(xl_tasks, t["hash"], t["name"])
 
-                    # ====== Step 3: 比速观察（不依赖 task_id，按名称匹配） ======
+                    # ====== Step 3: 比速观察（用 hash/名称匹配） ======
                     log.info(f"开始比速观察 ({SPEED_CHECK_DURATION}s)...")
                     xunlei_speeds = []
                     qbit_speeds = []
                     samples = SPEED_CHECK_DURATION // SPEED_CHECK_INTERVAL
-                    xunlei_task_name = t["name"]
 
                     for i in range(samples):
                         time.sleep(SPEED_CHECK_INTERVAL)
 
-                        # 查迅雷速度（通过名称匹配）
+                        # 查迅雷速度（通过 hash/名称匹配）
                         xl_speed = 0
                         xl_phase = "unknown"
                         try:
                             xl_all = xunlei.list_tasks("all")
-                            for task in xl_all:
-                                tname = task.get("file_name", task.get("name", ""))
-                                if tname and xunlei_task_name in tname:
-                                    params = task.get("params", {})
-                                    xl_speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
-                                    xl_phase = task.get("phase", "")
-                                    break
+                            matched = find_xunlei_task(xl_all, t["hash"], t["name"])
+                            if matched:
+                                params = matched.get("params", {})
+                                xl_speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                                xl_phase = matched.get("phase", "")
                         except Exception as e:
                             log.debug(f"查询迅雷状态异常: {e}")
 
@@ -635,14 +665,11 @@ def main():
                             qbit.remove_tag(t["hash"], TARGET_LABEL)
                         else:
                             log.info("qBit 更快或持平，删除迅雷任务")
-                            # 通过名称查找并删除迅雷任务
                             try:
                                 xl_all = xunlei.list_tasks("all")
-                                for task in xl_all:
-                                    tname = task.get("file_name", task.get("name", ""))
-                                    if tname and xunlei_task_name in tname:
-                                        delete_xunlei_task(xunlei, task.get("id", ""))
-                                        break
+                                matched = find_xunlei_task(xl_all, t["hash"], t["name"])
+                                if matched:
+                                    delete_xunlei_task(xunlei, matched.get("id", ""))
                             except Exception as e:
                                 log.debug(f"删除迅雷任务异常: {e}")
                             qbit.remove_tag(t["hash"], TARGET_LABEL)

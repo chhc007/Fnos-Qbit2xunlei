@@ -26,13 +26,15 @@ class XunleiDownloader:
     """迅雷下载器（纯 HTTP 版本）"""
 
     def __init__(self, nas_host: str, nas_port: int, nas_user: str, nas_pass: str,
-                 download_path: str = "", data_dir: str = None, filter_files: bool = False):
+                 download_path: str = "", data_dir: str = None, filter_files: bool = False,
+                 debug: bool = False):
         self.nas_host = nas_host
         self.nas_port = nas_port
         self.nas_user = nas_user
         self.nas_pass = nas_pass
         self.download_path = download_path
         self.filter_files = filter_files
+        self.debug = debug
 
         self.base_url = f"http://{nas_host}:{nas_port}"
         self.xunlei_base = f"{self.base_url}/cgi/ThirdParty/xunlei/index.cgi"
@@ -98,14 +100,19 @@ class XunleiDownloader:
             url = f'ws://{self.nas_host}:{self.nas_port}/websocket?type=main'
             headers = {'Origin': f'http://{self.nas_host}:{self.nas_port}'}
 
+            if self.debug:
+                log.debug(f"[DEBUG] WebSocket 连接: {url}")
+
             async with websockets.connect(url, additional_headers=headers) as ws:
                 # 获取 SI
                 await ws.send(json.dumps({'req': 'util.getSI', 'reqid': '1'}))
                 resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                 si = resp['si']
+                if self.debug:
+                    log.debug(f"[DEBUG] WebSocket SI: {si[:20]}...")
 
                 # 登录（不加密）
-                await ws.send(json.dumps({
+                login_msg = {
                     'req': 'user.login',
                     'user': self.nas_user,
                     'password': self.nas_pass,
@@ -115,8 +122,14 @@ class XunleiDownloader:
                     'deviceName': 'Python-Client',
                     'did': '',
                     'reqid': '2',
-                }))
+                }
+                if self.debug:
+                    log.debug(f"[DEBUG] WebSocket 登录请求: user={self.nas_user}")
+                await ws.send(json.dumps(login_msg))
                 resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if self.debug:
+                    safe_resp = {k: (v[:20] + '...' if isinstance(v, str) and len(v) > 20 else v) for k, v in resp.items()}
+                    log.debug(f"[DEBUG] WebSocket 登录响应: {json.dumps(safe_resp, ensure_ascii=False)}")
 
                 if resp.get('result') == 'succ':
                     return resp['token']
@@ -129,14 +142,22 @@ class XunleiDownloader:
     def _get_pan_auth(self) -> str:
         """从迅雷 HTML 页面提取 pan_auth JWT"""
         url = f'{self.xunlei_base}/'
+        if self.debug:
+            log.debug(f"[DEBUG] _get_pan_auth GET {url}")
         req = urllib.request.Request(url)
         req.add_header('Cookie', f'fnos-token={self.fnos_token}')
         resp = self.opener.open(req, timeout=10)
         html = resp.read().decode('utf-8')
+        if self.debug:
+            log.debug(f"[DEBUG] _get_pan_auth HTML 长度: {len(html)}, 前200字: {html[:200]}")
 
         match = re.search(r'function uiauth\(value\)\{\s*return\s*"([^"]+)"', html)
         if match:
+            if self.debug:
+                log.debug(f"[DEBUG] _get_pan_auth 提取成功, pan_auth 前20字: {match.group(1)[:20]}...")
             return match.group(1)
+        if self.debug:
+            log.debug(f"[DEBUG] _get_pan_auth 未找到 uiauth 函数")
         raise Exception("pan_auth 提取失败")
 
     # ============ 完整初始化 ============
@@ -184,12 +205,20 @@ class XunleiDownloader:
         if not self.fnos_token:
             return False
         try:
-            req = urllib.request.Request(f"{self.xunlei_base}/device/now")
+            url = f"{self.xunlei_base}/device/now"
+            if self.debug:
+                log.debug(f"[DEBUG] _test_nas_cookie GET {url}")
+            req = urllib.request.Request(url)
             req.add_header("Cookie", f"fnos-token={self.fnos_token}")
             resp = self.opener.open(req, timeout=10)
-            data = json.loads(resp.read())
+            body = resp.read()
+            data = json.loads(body)
+            if self.debug:
+                log.debug(f"[DEBUG] _test_nas_cookie 响应: {json.dumps(data, ensure_ascii=False)[:500]}")
             return "now" in data
-        except Exception:
+        except Exception as e:
+            if self.debug:
+                log.debug(f"[DEBUG] _test_nas_cookie 异常: {e}")
             return False
 
     def _test_auth(self) -> bool:
@@ -207,12 +236,19 @@ class XunleiDownloader:
                 "type": "user#runner",
             }
             url = f"{self.xunlei_base}/drive/v1/tasks?{urllib.parse.urlencode(params)}"
+            if self.debug:
+                log.debug(f"[DEBUG] _test_pan_auth GET {url}")
             req = urllib.request.Request(url)
             req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI=")
             resp = self.opener.open(req, timeout=10)
-            data = json.loads(resp.read())
+            body = resp.read()
+            data = json.loads(body)
+            if self.debug:
+                log.debug(f"[DEBUG] _test_pan_auth 响应: {json.dumps(data, ensure_ascii=False)[:500]}")
             return "tasks" in data
-        except Exception:
+        except Exception as e:
+            if self.debug:
+                log.debug(f"[DEBUG] _test_pan_auth 异常: {e}")
             return False
 
     def _api_get(self, path: str, extra_params: dict = None) -> dict:
@@ -225,11 +261,16 @@ class XunleiDownloader:
 
         sep = "&" if "?" in path else "?"
         url = f"{self.xunlei_base}{path}{sep}{urllib.parse.urlencode(params, doseq=True)}"
+        if self.debug:
+            log.debug(f"[DEBUG] API GET {url}")
         req = urllib.request.Request(url)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
 
         resp = self.opener.open(req, timeout=30)
-        return json.loads(resp.read())
+        body = resp.read()
+        if self.debug:
+            log.debug(f"[DEBUG] API GET 响应 (HTTP {resp.status}): {body.decode('utf-8', errors='replace')[:500]}")
+        return json.loads(body)
 
     def _api_post(self, path: str, body: dict = None, extra_params: dict = None, method: str = "POST") -> dict:
         params = {
@@ -243,12 +284,19 @@ class XunleiDownloader:
         sep = "&" if "?" in path else "?"
         url = f"{self.xunlei_base}{path}{sep}{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body or {}).encode("utf-8") if body else None
+        if self.debug:
+            log.debug(f"[DEBUG] API {method} {url}")
+            if data:
+                log.debug(f"[DEBUG] 请求体: {data.decode('utf-8', errors='replace')[:500]}")
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
         req.add_header("Content-Type", "application/json")
 
         resp = self.opener.open(req, timeout=30)
-        return json.loads(resp.read())
+        body = resp.read()
+        if self.debug:
+            log.debug(f"[DEBUG] API {method} 响应 (HTTP {resp.status}): {body.decode('utf-8', errors='replace')[:500]}")
+        return json.loads(body)
 
     # ============ 业务功能 ============
 

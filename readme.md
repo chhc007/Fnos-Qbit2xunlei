@@ -108,6 +108,7 @@ XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
 | `FILTER_FILES` | 迅雷端过滤非视频/字幕/nfo 文件 | `true` |
 | `ZERO_SPEED_ENABLED` | 0 速度超时自动清理 | `false` |
 | `ZERO_SPEED_TIMEOUT` | 0 速度超时时间（分钟） | `120` |
+| `DEBUG` | 调试模式，打印所有 API 请求/响应详情 | `false` |
 
 ## 技术细节
 
