@@ -1,0 +1,6 @@
+__pycache__
+*.pyc
+xunlei_data
+config.ini
+*.log
+.git

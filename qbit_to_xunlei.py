@@ -49,7 +49,7 @@ log = logging.getLogger("qbit2xunlei")
 
 # ============ 配置 ============
 
-CONFIG_PATH = os.environ.get("CONFIG_PATH", os.path.join(os.path.dirname(__file__), "config.ini"))
+CONFIG_PATH = os.environ.get("CONFIG_PATH", os.path.join(os.path.dirname(__file__), "./config/config.ini"))
 
 if not os.path.exists(CONFIG_PATH):
     log.error(f"配置文件不存在: {CONFIG_PATH}")
