@@ -37,8 +37,23 @@ TARGET_LABEL = 迅雷
 # 删除 qBit 任务时是否同时删除文件
 DELETE_FILES = false
 
-# 是否等待迅雷下载完成后再删除 qBit 任务
-WAIT_COMPLETION = false
-
 # 最大同时转存任务数
 MAX_CONCURRENT = 3
+
+# 比速观察时长（秒）
+SPEED_CHECK_DURATION = 60
+
+# 比速采样间隔（秒）
+SPEED_CHECK_INTERVAL = 10
+
+# 提交后等待迅雷开始的秒数
+INITIAL_WAIT = 10
+
+# 最低有效速度（bytes/s），低于此视为“没速度”
+MIN_SPEED_BYTES = 1024
+
+# 0速度超时自动清理（true/false）
+ZERO_SPEED_ENABLED = true
+
+# 0速度超时（分钟）：下载任务持续0速度超过此时间则自动删除
+ZERO_SPEED_TIMEOUT = 10
