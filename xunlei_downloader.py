@@ -26,12 +26,13 @@ class XunleiDownloader:
     """迅雷下载器（纯 HTTP 版本）"""
 
     def __init__(self, nas_host: str, nas_port: int, nas_user: str, nas_pass: str,
-                 download_path: str = "", data_dir: str = None):
+                 download_path: str = "", data_dir: str = None, filter_files: bool = False):
         self.nas_host = nas_host
         self.nas_port = nas_port
         self.nas_user = nas_user
         self.nas_pass = nas_pass
         self.download_path = download_path
+        self.filter_files = filter_files
 
         self.base_url = f"http://{nas_host}:{nas_port}"
         self.xunlei_base = f"{self.base_url}/cgi/ThirdParty/xunlei/index.cgi"
@@ -52,7 +53,7 @@ class XunleiDownloader:
         self.video_extensions = {
             '.mkv', '.mp4', '.avi', '.rmvb', '.rm', '.wmv', '.flv',
             '.mov', '.ts', '.m4v', '.webm', '.vob', '.mpg', '.mpeg',
-            '.3gp', '.f4v', '.ogv'
+            '.3gp', '.f4v', '.ogv', '.nfo', '.str'
         }
 
     # ============ 凭据管理 ============
@@ -275,49 +276,35 @@ class XunleiDownloader:
 
     def add_download(self, url: str, name: str = "", target_dir: str = "") -> Optional[str]:
         """
-        添加下载任务（通过 API）
+        添加下载任务（通过 Playwright 操作迅雷 Web 界面）
 
         参数:
             url: 磁力链接或 HTTP 下载链接
             name: 任务名称（可选）
             target_dir: 下载目录（NAS 真实路径，可选）
 
-        返回: task_id 或 None
+        返回: "ok" 或 None
         """
         log.info(f"添加下载任务: {url[:60]}...")
 
-        # 确定下载目录
         effective_dir = target_dir or self.download_path
 
-        body = {
-            "type": "user#download-url",
-            "name": name or "download",
-            "file_name": name or "download",
-            "file_size": "0",
-            "space": self.device_space or "",
-            "params": {
-                "url": url,
-                "target": self.device_space or "",
-            },
-        }
-
-        if effective_dir:
-            body["params"]["parent_folder_path"] = effective_dir
-
         try:
-            data = self._api_post("/drive/v1/task", body)
-            task_id = data.get("task", {}).get("id")
-            if task_id:
-                log.info(f"任务已创建: {task_id}")
-                return task_id
-            log.error(f"创建任务失败: {data}")
-            return None
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="replace")
-            log.error(f"创建任务 HTTP 错误 {e.code}: {error_body[:300]}")
+            from xunlei_playwright import XunleiPlaywright
+            pw = XunleiPlaywright(
+                xunlei_url=self.xunlei_base,
+                fnos_token=self.fnos_token or "",
+                download_path=effective_dir,
+                filter_files=self.filter_files,
+            )
+            success = pw.add_download(url, name=name)
+            if success:
+                log.info("Playwright 下载任务提交成功")
+                return "ok"
+            log.error("Playwright 下载任务提交失败")
             return None
         except Exception as e:
-            log.error(f"创建任务异常: {e}")
+            log.error(f"Playwright 下载异常: {e}")
             return None
 
     def wait_task(self, task_id: str, timeout: int = 3600, poll_interval: int = 10) -> str:

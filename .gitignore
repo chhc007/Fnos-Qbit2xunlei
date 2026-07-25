@@ -1,8 +1,14 @@
-__pycache__
+__pycache__/
 *.pyc
-xunlei_data
-config.ini
 *.log
+
+# 配置文件（含密码，不入库）
+config/config.ini
+xunlei_data/
+
+# 已弃用的旧版本
+Qbit2Thunder/
+
+# 工具目录
+.mimocode/
 .git
-.mimocode
-credentials.json
