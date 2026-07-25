@@ -548,6 +548,11 @@ def main():
                 # 标记为处理中
                 processing.add(t["hash"])
 
+                # 凭证检查：如果过期则刷新
+                if not xunlei._test_auth():
+                    log.warning("凭证已过期，刷新中...")
+                    xunlei.init()
+
                 try:
                     # ====== Step 0: 预检查 qBit 速度 ======
                     if PRE_CHECK_WAIT > 0:
