@@ -14,6 +14,7 @@ import re
 import asyncio
 import urllib.request
 import urllib.parse
+import urllib.error
 import http.cookiejar
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -228,7 +229,7 @@ class XunleiDownloader:
         resp = self.opener.open(req, timeout=30)
         return json.loads(resp.read())
 
-    def _api_post(self, path: str, body: dict = None, extra_params: dict = None) -> dict:
+    def _api_post(self, path: str, body: dict = None, extra_params: dict = None, method: str = "POST") -> dict:
         params = {
             "pan_auth": self.pan_auth,
             "device_space": "",
@@ -238,7 +239,7 @@ class XunleiDownloader:
 
         url = f"{self.xunlei_base}{path}?{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body or {}).encode("utf-8") if body else None
-        req = urllib.request.Request(url, data=data, method="POST")
+        req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
         req.add_header("Content-Type", "application/json")
 
@@ -269,12 +270,14 @@ class XunleiDownloader:
         data = self._api_get("/drive/v1/tasks", params)
         return data.get("tasks", [])
 
-    def add_download(self, url: str) -> Optional[str]:
+    def add_download(self, url: str, name: str = "", target_dir: str = "") -> Optional[str]:
         """
         添加下载任务（通过 API）
 
         参数:
             url: 磁力链接或 HTTP 下载链接
+            name: 任务名称（可选）
+            target_dir: 下载目录（NAS 真实路径，可选）
 
         返回: task_id 或 None
         """
@@ -282,13 +285,18 @@ class XunleiDownloader:
 
         body = {
             "type": "user#download-url",
-            "name": "",
+            "name": name or "download",
+            "file_name": name or "download",
+            "file_size": "0",
             "params": {
                 "url": url,
             },
         }
 
-        if self.download_path:
+        # 优先用传入的 target_dir，其次用默认 download_path
+        if target_dir:
+            body["params"]["target_dir"] = target_dir
+        elif self.download_path:
             body["params"]["target_dir"] = self.download_path
 
         try:
@@ -298,6 +306,10 @@ class XunleiDownloader:
                 log.info(f"任务已创建: {task_id}")
                 return task_id
             log.error(f"创建任务失败: {data}")
+            return None
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            log.error(f"创建任务 HTTP 错误 {e.code}: {error_body[:300]}")
             return None
         except Exception as e:
             log.error(f"创建任务异常: {e}")

@@ -241,8 +241,8 @@ class NasXunleiClient:
         resp = self.opener.open(req, timeout=30)
         return json.loads(resp.read())
 
-    def _api_post(self, path: str, body: dict = None, extra_params: dict = None) -> dict:
-        """POST 请求迅雷 API"""
+    def _api_post(self, path: str, body: dict = None, extra_params: dict = None, method: str = "POST") -> dict:
+        """POST/DELETE 请求迅雷 API"""
         params = {
             "pan_auth": self.pan_auth,
             "device_space": "",
@@ -252,7 +252,7 @@ class NasXunleiClient:
 
         url = f"{XUNLEI_BASE}{path}?{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body or {}).encode("utf-8") if body else None
-        req = urllib.request.Request(url, data=data, method="POST")
+        req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci}")
         req.add_header("Content-Type", "application/json")
 
