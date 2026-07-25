@@ -24,20 +24,22 @@ qBit 任务带"迅雷"标签
 
 ### 1. 准备配置文件
 
-```bash
-cp config/config.ini.example config/config.ini
-vim config/config.ini
-```
+只需要在nas上准备个目录用来存放配置文件
+
+配置文件可以等docker运行之后再去改
 
 填写：
 - qBit Web UI 地址、账号密码
 - NAS 地址、账号密码
 
+其他配置自己看
+
+改完之后重命名为config.ini 重启容器
+
 ### 2. Docker 部署
 
-```bash
-docker compose up -d --build
-```
+使用compose部署
+[配置示例](docker-compose.yml)
 
 ### 3. 使用
 
@@ -109,20 +111,7 @@ XUNLEI_BASE_PATH = /vol5/1000/影视库/下载/迅雷下载影视
 | `MAX_CONCURRENT` | 最大同时转存任务数 | `3` |
 | `DELETE_FILES` | 删除 qBit 任务时是否同时删文件 | `false` |
 
-## 文件结构
 
-```
-fn-xunlei/
-├── qbit_to_xunlei.py      # 主脚本
-├── xunlei_downloader.py    # 迅雷 API 核心模块
-├── config/
-│   ├── config.ini          # 实际配置
-│   └── config.ini.example  # 配置模板
-├── xunlei_data/            # 凭据缓存（自动生成）
-├── Dockerfile
-├── docker-compose.yml
-└── README.md
-```
 
 ## 本地运行（不用 Docker）
 
