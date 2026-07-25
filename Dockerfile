@@ -6,7 +6,10 @@ RUN pip install --no-cache-dir requests websockets
 
 COPY xunlei_downloader.py .
 COPY qbit_to_xunlei.py .
-COPY config/config.ini.example config/
+
+# 保存模板到非挂载目录
+COPY config/config.ini.example /app/config.ini.example
+
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
