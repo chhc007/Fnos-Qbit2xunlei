@@ -15,8 +15,17 @@ NAS_USER = shield
 NAS_PASS = shield
 
 # 迅雷下载路径（留空使用迅雷默认路径）
-# 示例: /存储空间5/shield的文件/影视库/下载/迅雷下载影视
+# 示例: /vol5/1000/影视库/下载/迅雷下载影视
 XUNLEI_DOWNLOAD_PATH =
+
+# qBit 保存路径前缀（去除后拼接到迅雷路径）
+# 示例: qBit 任务保存路径是 /downloads/电影/华语电影
+#   QBIT_SAVE_PATH_PREFIX = /downloads
+#   XUNLEI_BASE_PATH = /vol5/1000/影视库/下载/迅雷下载影视
+#   最终迅雷路径 = /vol5/1000/影视库/下载/迅雷下载影视/电影/华语电影
+# 留空则不映射，直接用 XUNLEI_DOWNLOAD_PATH
+QBIT_SAVE_PATH_PREFIX =
+XUNLEI_BASE_PATH =
 
 [general]
 # 检查间隔（秒）
