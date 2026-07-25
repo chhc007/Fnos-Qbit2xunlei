@@ -1,8 +1,9 @@
 services:
   fnosqbit2xunlei:
-    #build: .
+    image: chhc007/fnos-qbit2xunlei:latest
     container_name: fnosqbit2xunlei
     restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
-      - ./config:/app/config #你的配置文件必须挂载到本地目录
-
+      - /vol4/1000/DockerConfig/fnosqbit2xunlei/config:/app/config
