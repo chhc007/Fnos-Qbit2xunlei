@@ -14,6 +14,7 @@ qBittorrent → 迅雷 自动转存脚本
 """
 
 import os
+import re
 import sys
 import time
 import logging
@@ -99,6 +100,9 @@ FILTER_FILES = config.getboolean("general", "FILTER_FILES", fallback=False)
 # 调试模式
 DEBUG = config.getboolean("general", "DEBUG", fallback=False)
 
+# 任务读取方式
+TASK_SOURCE = config.get("general", "TASK_SOURCE", fallback="api")
+
 if DEBUG:
     logging.getLogger().setLevel(logging.DEBUG)
     log.debug("调试模式已开启")
@@ -116,6 +120,7 @@ else:
     log.info("  0速度超时: 已禁用")
 log.info(f"  文件过滤: {'启用' if FILTER_FILES else '禁用'}")
 log.info(f"  调试模式: {'开启' if DEBUG else '关闭'}")
+log.info(f"  任务读取: {TASK_SOURCE}")
 
 
 # ============ qBittorrent API ============
@@ -459,6 +464,7 @@ def main():
         download_path=XUNLEI_DOWNLOAD_PATH,
         filter_files=FILTER_FILES,
         debug=DEBUG,
+        task_source=TASK_SOURCE,
     )
 
     log.info("正在初始化迅雷下载器...")

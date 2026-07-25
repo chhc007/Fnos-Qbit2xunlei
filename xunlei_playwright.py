@@ -407,3 +407,115 @@ class XunleiPlaywright:
         if idx >= 0:
             return filename[idx:].lower()
         return ''
+
+    def list_tasks(self) -> list:
+        """
+        通过 Playwright 读取迅雷网页上的任务列表。
+        返回格式与 API list_tasks 兼容：[{"id", "name", "file_name", "phase", "params": {"speed": ...}}]
+        """
+        from playwright.sync_api import sync_playwright
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context()
+
+                cookie_domain = self.xunlei_url.split("//")[1].split(":")[0]
+                context.add_cookies([{
+                    "name": "fnos-token",
+                    "value": self.fnos_token,
+                    "domain": cookie_domain,
+                    "path": "/",
+                }])
+
+                page = context.new_page()
+                page.goto(self.xunlei_url, wait_until="networkidle", timeout=30000)
+                time.sleep(5)
+
+                # 等待任务列表加载
+                try:
+                    page.wait_for_selector('li.task-item.pan-list-item', timeout=5000)
+                except Exception:
+                    # 没有任务
+                    browser.close()
+                    return []
+
+                task_items = page.query_selector_all('li.task-item.pan-list-item')
+                tasks = []
+                for item in task_items:
+                    try:
+                        task = self._parse_task_item(item)
+                        if task:
+                            tasks.append(task)
+                    except Exception as e:
+                        log.debug(f"解析任务项异常: {e}")
+
+                browser.close()
+                log.info(f"Playwright 读取到 {len(tasks)} 个迅雷任务")
+                return tasks
+
+        except Exception as e:
+            log.warning(f"Playwright 读取任务列表异常: {e}")
+            return []
+
+    def _parse_task_item(self, item) -> dict:
+        """解析单个任务 DOM 节点"""
+        # ID: 从 li#task_item_XXX 提取
+        item_id = item.get_attribute("id") or ""
+        if item_id.startswith("task_item_"):
+            item_id = item_id[len("task_item_"):]
+        else:
+            item_id = item_id
+
+        # 名称
+        name_elem = item.query_selector('.task-item__info a')
+        name = name_elem.inner_text().strip() if name_elem else ""
+
+        # 状态文本（可能是速度 "12.9MB/s"，也可能是 "校验中"、"等待中" 等）
+        status_elem = item.query_selector('.task-item__status')
+        status_text = status_elem.inner_text().strip() if status_elem else ""
+
+        # 大小
+        size_elem = item.query_selector('.task-item__size')
+        size_text = size_elem.inner_text().strip() if size_elem else ""
+
+        # 解析速度
+        speed = self._parse_speed(status_text)
+
+        # 映射 phase
+        phase = self._map_phase(status_text)
+
+        return {
+            "id": item_id,
+            "name": name,
+            "file_name": name,
+            "phase": phase,
+            "params": {"speed": str(speed)},
+        }
+
+    @staticmethod
+    def _parse_speed(text: str) -> int:
+        """从状态文本中解析速度，返回 bytes/s"""
+        import re
+        match = re.search(r'(\d+(?:\.\d+)?)\s*(B/s|KB/s|MB/s|GB/s)', text)
+        if not match:
+            return 0
+        value = float(match.group(1))
+        unit = match.group(2)
+        multipliers = {"B/s": 1, "KB/s": 1024, "MB/s": 1024 * 1024, "GB/s": 1024 * 1024 * 1024}
+        return int(value * multipliers.get(unit, 1))
+
+    @staticmethod
+    def _map_phase(status_text: str) -> str:
+        """将状态文本映射为 API 兼容的 phase"""
+        if re.search(r'\d+(\.\d+)?\s*(B/s|KB/s|MB/s|GB/s)', status_text):
+            return "PHASE_TYPE_RUNNING"
+        if "等待中" in status_text:
+            return "PHASE_TYPE_PENDING"
+        if "校验中" in status_text:
+            return "PHASE_TYPE_RUNNING"
+        if "下载失败" in status_text or "失败" in status_text:
+            return "PHASE_TYPE_ERROR"
+        if "完成" in status_text:
+            return "PHASE_TYPE_COMPLETE"
+        return "PHASE_TYPE_RUNNING"
