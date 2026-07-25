@@ -317,6 +317,7 @@ class XunleiDownloader:
             "space": self.device_space or "device_id#8d842bc20de9d63e49eb0cc7ebaea16e",
             "limit": "100",
             "filters": json.dumps(filters),
+            "type": "user#download-url,user#download",
         }
 
         data = self._api_get("/drive/v1/tasks", params)
