@@ -1,9 +1,8 @@
 services:
-  fnos-qbit2xunlei:
+  fnosqbit2xunlei:
     build: .
     container_name: fnosqbit2xunlei
     restart: unless-stopped
-    network_mode: host
     volumes:
       - ./config:/app/config
     logging:
