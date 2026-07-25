@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
 qBittorrent → 迅雷 自动转存脚本
-功能：监听 qBit 中带特定标签的任务，自动用迅雷下载
 
-流程：
-  1. 发现带"迅雷"标签的 qBit 任务 → 提交迅雷下载
-  2. 等待 10 秒，检查迅雷任务是否真的开始了
-  3. 如果失败 → 保留 qBit，移除迅雷标签，标记"迅雷失败"
-  4. 如果开始下载 → 观察 60 秒，比较迅雷和 qBit 的平均速度
-  5. 迅雷更快 → 删除 qBit 任务
-  6. 迅雷更慢/没速度 → 删除迅雷任务，保留 qBit
+功能：
+  1. 监听 qBit 中带特定标签的任务，自动用迅雷下载
+  2. 比速后决定保留哪个
+  3. 持续监控所有下载任务，0速度超时自动清理
 
 用法:
   1. 配置 config.ini
@@ -84,17 +80,25 @@ DELETE_FILES = config.getboolean("general", "DELETE_FILES", fallback=False)
 MAX_CONCURRENT = config.getint("general", "MAX_CONCURRENT", fallback=3)
 
 # 速度比较参数
-SPEED_CHECK_DURATION = 20   # 观察时长（秒）
-SPEED_CHECK_INTERVAL = 10   # 采样间隔（秒）
-INITIAL_WAIT = 10           # 提交后等待迅雷开始的秒数
-MIN_SPEED_BYTES = 1024      # 最低有效速度（1KB/s），低于此视为"没速度"
+SPEED_CHECK_DURATION = config.getint("general", "SPEED_CHECK_DURATION", fallback=60)
+SPEED_CHECK_INTERVAL = config.getint("general", "SPEED_CHECK_INTERVAL", fallback=10)
+INITIAL_WAIT = config.getint("general", "INITIAL_WAIT", fallback=10)
+MIN_SPEED_BYTES = config.getint("general", "MIN_SPEED_BYTES", fallback=1024)
+
+# 0速度超时
+ZERO_SPEED_ENABLED = config.getboolean("general", "ZERO_SPEED_ENABLED", fallback=True)
+ZERO_SPEED_TIMEOUT = config.getint("general", "ZERO_SPEED_TIMEOUT", fallback=10) * 60  # 转为秒
 
 log.info("✅ 配置加载完成")
 log.info(f"  qBit: {QB_HOST}")
 log.info(f"  NAS:  {NAS_HOST}:{NAS_PORT}")
 log.info(f"  标签: {TARGET_LABEL}")
 log.info(f"  间隔: {CHECK_INTERVAL}s")
-log.info(f"  比速观察: {SPEED_CHECK_DURATION}s")
+log.info(f"  比速: {SPEED_CHECK_DURATION}s (每{SPEED_CHECK_INTERVAL}s采样)")
+if ZERO_SPEED_ENABLED:
+    log.info(f"  0速度超时: {ZERO_SPEED_TIMEOUT // 60}分钟")
+else:
+    log.info("  0速度超时: 已禁用")
 
 
 # ============ qBittorrent API ============
@@ -121,7 +125,6 @@ class QBitClient:
         return resp.json()
 
     def get_torrent(self, hash_: str) -> dict:
-        """获取单个任务信息"""
         torrents = self.get_torrents()
         for t in torrents:
             if t["hash"] == hash_:
@@ -133,6 +136,19 @@ class QBitClient:
         resp = self.session.get(url, params={"hash": hash_}, verify=False)
         resp.raise_for_status()
         return [f["name"] for f in resp.json()]
+
+    def get_torrent_trackers(self, hash_: str) -> list:
+        """获取任务的 tracker 列表"""
+        url = f"{self.host}/api/v2/torrents/trackers"
+        resp = self.session.get(url, params={"hash": hash_}, verify=False)
+        resp.raise_for_status()
+        trackers = []
+        for t in resp.json():
+            tracker_url = t.get("url", "")
+            # 过滤掉通配符和私有 tracker
+            if tracker_url and tracker_url not in ("** [DHT] **", "** [PeX] **", "** [LSD] **"):
+                trackers.append(tracker_url)
+        return trackers
 
     def get_speed(self, hash_: str) -> int:
         """获取任务当前下载速度（bytes/s）"""
@@ -161,13 +177,16 @@ class QBitClient:
 
 # ============ 工具函数 ============
 
-def generate_magnet(hash_: str, name: str) -> str:
+def generate_magnet(hash_: str, name: str, trackers: list = None) -> str:
     name_encoded = urllib.parse.quote(name)
-    return f"magnet:?xt=urn:btih:{hash_}&dn={name_encoded}"
+    magnet = f"magnet:?xt=urn:btih:{hash_}&dn={name_encoded}"
+    if trackers:
+        for tr in trackers:
+            magnet += f"&tr={urllib.parse.quote(tr, safe='')}"
+    return magnet
 
 
 def fmt_speed(bps: int) -> str:
-    """格式化速度显示"""
     if bps < 1024:
         return f"{bps} B/s"
     elif bps < 1024 * 1024:
@@ -177,7 +196,6 @@ def fmt_speed(bps: int) -> str:
 
 
 def fmt_size(size: int) -> str:
-    """格式化大小显示"""
     if size < 1024:
         return f"{size} B"
     elif size < 1024 * 1024:
@@ -188,29 +206,42 @@ def fmt_size(size: int) -> str:
         return f"{size / (1024 * 1024 * 1024):.2f} GB"
 
 
+def fmt_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60}s"
+    else:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+
+
 # ============ 迅雷任务状态检查 ============
 
-def check_xunlei_task_status(xunlei: XunleiDownloader, task_id: str) -> dict:
-    """
-    检查迅雷任务状态
-    返回: {"phase": str, "speed": int, "progress": int, "error": str}
-    """
+def check_xunlei_task(xunlei: XunleiDownloader, task_id: str) -> dict:
+    """检查迅雷任务状态（从列表中查找）"""
     try:
-        data = xunlei._api_get(f"/drive/v1/tasks/{task_id}")
-        phase = data.get("phase", "")
-        progress = data.get("progress", {})
-        speed = progress.get("speed", 0)
-        pct = progress.get("progress", 0)
-        error = data.get("error", "")
-
-        return {
-            "phase": phase,
-            "speed": speed,
-            "progress": pct,
-            "error": error,
-        }
+        tasks = xunlei.list_tasks("all")
+        for t in tasks:
+            if t.get("id") == task_id:
+                phase = t.get("phase", "")
+                params = t.get("params", {})
+                # speed 在 params 里，是字符串
+                speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                progress = t.get("progress", 0)
+                pct = progress if isinstance(progress, (int, float)) else 0
+                return {"phase": phase, "speed": speed, "progress": pct, "error": ""}
+        return {"phase": "unknown", "speed": 0, "progress": 0, "error": "not found"}
     except Exception as e:
         return {"phase": "unknown", "speed": 0, "progress": 0, "error": str(e)}
+
+
+def delete_xunlei_task(xunlei: XunleiDownloader, task_id: str):
+    """删除迅雷任务"""
+    try:
+        xunlei._api_post(f"/drive/v1/tasks?task_ids={task_id}", method="DELETE")
+        log.info(f"已删除迅雷任务: {task_id[:16]}...")
+    except Exception as e:
+        log.warning(f"删除迅雷任务失败: {e}")
 
 
 # ============ 核心比速逻辑 ============
@@ -218,12 +249,9 @@ def check_xunlei_task_status(xunlei: XunleiDownloader, task_id: str) -> dict:
 def observe_and_compare(xunlei: XunleiDownloader, qbit: QBitClient,
                         task_id: str, qbit_hash: str) -> str:
     """
-    观察迅雷任务 60 秒，与 qBit 比较速度
+    观察迅雷任务，与 qBit 比较速度
 
-    返回:
-      "xunlei_faster"  → 迅雷更快，删 qBit
-      "qbit_faster"    → qBit 更快或迅雷没速度，删迅雷
-      "xunlei_failed"  → 迅雷任务失败
+    返回: "xunlei_faster" / "qbit_faster" / "xunlei_failed"
     """
     log.info(f"开始比速观察 ({SPEED_CHECK_DURATION}s)...")
 
@@ -234,53 +262,132 @@ def observe_and_compare(xunlei: XunleiDownloader, qbit: QBitClient,
     for i in range(samples):
         time.sleep(SPEED_CHECK_INTERVAL)
 
-        # 迅雷速度
-        status = check_xunlei_task_status(xunlei, task_id)
+        status = check_xunlei_task(xunlei, task_id)
         xl_speed = status["speed"]
         xunlei_speeds.append(xl_speed)
 
-        # qBit 速度
         qb_speed = qbit.get_speed(qbit_hash)
         qbit_speeds.append(qb_speed)
 
         phase = status["phase"]
         log.info(f"  [{(i+1)*SPEED_CHECK_INTERVAL}s] "
                  f"迅雷: {fmt_speed(xl_speed)} | qBit: {fmt_speed(qb_speed)} | "
-                 f"迅雷状态: {phase}")
+                 f"迅雷: {phase}")
 
-        # 迅雷任务失败/出错
         if phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
-            log.warning(f"迅雷任务失败: {phase} - {status.get('error', '')}")
+            log.warning(f"迅雷任务失败: {phase}")
             return "xunlei_failed"
 
-        # 迅雷任务已完成（小文件秒下）
         if phase == "PHASE_TYPE_COMPLETE":
-            log.info("迅雷任务已完成（秒下）")
+            log.info("迅雷任务已完成")
             return "xunlei_faster"
 
-    # 计算平均速度
     avg_xunlei = sum(xunlei_speeds) / len(xunlei_speeds) if xunlei_speeds else 0
     avg_qbit = sum(qbit_speeds) / len(qbit_speeds) if qbit_speeds else 0
 
     log.info(f"平均速度 → 迅雷: {fmt_speed(int(avg_xunlei))} | qBit: {fmt_speed(int(avg_qbit))}")
 
-    # 迅雷没速度
     if avg_xunlei < MIN_SPEED_BYTES:
         log.info("迅雷平均速度过低，判定 qBit 更优")
         return "qbit_faster"
 
-    # qBit 没速度但迅雷有速度 → 迅雷赢
     if avg_qbit < MIN_SPEED_BYTES and avg_xunlei >= MIN_SPEED_BYTES:
         log.info("qBit 没速度，迅雷有速度，判定迅雷更优")
         return "xunlei_faster"
 
-    # 都有速度，比较
     if avg_xunlei > avg_qbit:
         log.info(f"迅雷更快 ({fmt_speed(int(avg_xunlei))} > {fmt_speed(int(avg_qbit))})")
         return "xunlei_faster"
     else:
-        log.info(f"qBit 更快或持平 ({fmt_speed(int(avg_qbit))} >= {fmt_speed(int(avg_xunlei))})")
+        log.info(f"qBit 更快或持平")
         return "qbit_faster"
+
+
+# ============ 0速度监控 ============
+
+class ZeroSpeedMonitor:
+    """监控下载任务，0速度超时自动清理"""
+
+    def __init__(self, timeout_seconds: int, xunlei: XunleiDownloader = None):
+        self.timeout = timeout_seconds
+        self.xunlei = xunlei
+        # {key: {"first_zero": timestamp, "type": "qbit"/"xunlei", "task_id": ..., "hash": ...}}
+        self.tracking = {}
+
+    def check_qbit(self, qbit: QBitClient, hash_: str, name: str) -> bool:
+        """检查 qBit 任务，返回 True 表示已处理（删除/标记）"""
+        key = f"qbit:{hash_}"
+        t = qbit.get_torrent(hash_)
+        if not t:
+            self.tracking.pop(key, None)
+            return False
+
+        state = t.get("state", "")
+        if state not in ("downloading", "stalledDL", "metaDL"):
+            self.tracking.pop(key, None)
+            return False
+
+        speed = t.get("dlspeed", 0)
+        progress = t.get("progress", 0)
+
+        # 有速度 → 清除跟踪
+        if speed > 0:
+            self.tracking.pop(key, None)
+            return False
+
+        # 0速度
+        now = time.time()
+        if key not in self.tracking:
+            self.tracking[key] = {"first_zero": now, "type": "qbit", "hash": hash_, "name": name}
+            return False
+
+        elapsed = now - self.tracking[key]["first_zero"]
+        if elapsed >= self.timeout:
+            log.warning(f"⏰ qBit 0速度超时 ({fmt_duration(int(elapsed))}): {name}")
+            qbit.delete_torrent(hash_, delete_files=DELETE_FILES)
+            self.tracking.pop(key, None)
+            return True
+
+        remaining = self.timeout - elapsed
+        log.debug(f"qBit 0速度跟踪: {name} 已 {fmt_duration(int(elapsed))}，"
+                  f"剩余 {fmt_duration(int(remaining))}")
+        return False
+
+    def check_xunlei_task_by_speed(self, task_id: str, name: str, speed: int) -> bool:
+        """检查迅雷任务（直接传入速度），返回 True 表示已处理（删除）"""
+        key = f"xunlei:{task_id}"
+
+        # 有速度 → 清除跟踪
+        if speed > 0:
+            self.tracking.pop(key, None)
+            return False
+
+        # 0速度
+        now = time.time()
+        if key not in self.tracking:
+            self.tracking[key] = {"first_zero": now, "type": "xunlei", "task_id": task_id, "name": name}
+            return False
+
+        elapsed = now - self.tracking[key]["first_zero"]
+        if elapsed >= self.timeout:
+            log.warning(f"⏰ 迅雷 0速度超时 ({fmt_duration(int(elapsed))}): {name}")
+            delete_xunlei_task(self.xunlei, task_id)
+            self.tracking.pop(key, None)
+            return True
+
+        remaining = self.timeout - elapsed
+        log.debug(f"迅雷 0速度跟踪: {name} 已 {fmt_duration(int(elapsed))}，"
+                  f"剩余 {fmt_duration(int(remaining))}")
+        return False
+
+    def cleanup(self, active_qbit_hashes: set, active_xunlei_ids: set):
+        """清理已不存在的任务跟踪"""
+        for key in list(self.tracking.keys()):
+            t = self.tracking[key]
+            if t["type"] == "qbit" and t["hash"] not in active_qbit_hashes:
+                self.tracking.pop(key, None)
+            elif t["type"] == "xunlei" and t["task_id"] not in active_xunlei_ids:
+                self.tracking.pop(key, None)
 
 
 # ============ 主逻辑 ============
@@ -308,16 +415,48 @@ def main():
         sys.exit(1)
     log.info("✅ 迅雷下载器初始化完成")
 
-    # 正在处理的任务（防止重复提交）
+    # 正在处理的任务
     processing = set()
-    # 已失败的任务（防止无限重试）
+    # 已失败的任务
     failed = set()
+    # 0速度监控器
+    zero_monitor = ZeroSpeedMonitor(ZERO_SPEED_TIMEOUT, xunlei=xunlei)
 
     log.info("开始监听 qBit 任务...")
     while True:
         try:
             torrents = qbit.get_torrents()
 
+            # ====== 0速度监控 ======
+            if ZERO_SPEED_ENABLED:
+                # qBit
+                for t in torrents:
+                    hash_ = t["hash"]
+                    state = t.get("state", "")
+                    if state in ("downloading", "stalledDL", "metaDL"):
+                        if hash_ not in processing:
+                            zero_monitor.check_qbit(qbit, hash_, t["name"])
+
+                # 迅雷（复用列表，避免重复请求）
+                try:
+                    xl_all_tasks = xunlei.list_tasks("all")
+                    for task in xl_all_tasks:
+                        tid = task.get("id", "")
+                        phase = task.get("phase", "")
+                        if phase not in ("PHASE_TYPE_RUNNING", "PHASE_TYPE_PENDING"):
+                            continue
+                        tname = task.get("file_name", task.get("name", "unknown"))
+                        params = task.get("params", {})
+                        speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                        if speed > 0:
+                            zero_monitor.tracking.pop(f"xunlei:{tid}", None)
+                            continue
+                        if tid and tid not in processing:
+                            zero_monitor.check_xunlei_task_by_speed(tid, tname, speed)
+                except Exception as e:
+                    log.debug(f"迅雷任务监控异常: {e}")
+
+            # ====== 转存逻辑 ======
             for t in torrents:
                 PROCESS_STATES = ["downloading", "stalledDL", "metaDL"]
 
@@ -333,8 +472,13 @@ def main():
                 log.info(f"  Hash: {t['hash'][:16]}...")
                 log.info(f"  状态: {t['state']} | qBit 速度: {fmt_speed(t.get('dlspeed', 0))}")
 
-                # 获取磁力链接
-                magnet = t.get("magnet_uri") or t.get("magnetUri") or generate_magnet(t["hash"], t["name"])
+                # 获取磁力链接（优先用 qBit 的完整磁力，含 tracker）
+                magnet = t.get("magnet_uri") or t.get("magnetUri") or ""
+                if not magnet or "&tr=" not in magnet:
+                    # qBit 没返回完整磁力，用 hash + tracker 重建
+                    trackers = qbit.get_torrent_trackers(t["hash"])
+                    magnet = generate_magnet(t["hash"], t["name"], trackers)
+                    log.info(f"  Tracker 数: {len(trackers)}")
 
                 # 计算迅雷下载路径
                 target_dir = ""
@@ -345,7 +489,7 @@ def main():
                         target_dir = f"{XUNLEI_BASE_PATH}/{sub_path}" if sub_path else XUNLEI_BASE_PATH
                         log.info(f"  路径映射: {save_path} → {target_dir}")
                     else:
-                        log.warning(f"  路径前缀不匹配: {save_path} (期望前缀: {QBIT_SAVE_PATH_PREFIX})")
+                        log.warning(f"  路径前缀不匹配: {save_path}")
                 elif XUNLEI_DOWNLOAD_PATH:
                     target_dir = XUNLEI_DOWNLOAD_PATH
 
@@ -370,7 +514,7 @@ def main():
                     log.info(f"等待 {INITIAL_WAIT}s 观察迅雷是否开始下载...")
                     time.sleep(INITIAL_WAIT)
 
-                    status = check_xunlei_task_status(xunlei, task_id)
+                    status = check_xunlei_task(xunlei, task_id)
                     phase = status["phase"]
                     log.info(f"迅雷状态: {phase} | 速度: {fmt_speed(status['speed'])}")
 
@@ -380,11 +524,7 @@ def main():
                         failed.add(t["hash"])
                         qbit.remove_tag(t["hash"], TARGET_LABEL)
                         qbit.add_tag(t["hash"], "迅雷失败")
-                        # 删除失败的迅雷任务
-                        try:
-                            xunlei._api_post(f"/drive/v1/tasks?task_ids={task_id}", method="DELETE")
-                        except:
-                            pass
+                        delete_xunlei_task(xunlei, task_id)
                         continue
 
                     # 迅雷已完成（秒下）
@@ -394,41 +534,35 @@ def main():
                         qbit.remove_tag(t["hash"], TARGET_LABEL)
                         continue
 
-                    # 迅雷还在 pending/queued → 可能排队中，再等一轮
-                    if phase in ("PHASE_TYPE_PENDING",):
+                    # 迅雷排队中
+                    if phase == "PHASE_TYPE_PENDING":
                         log.info("迅雷任务排队中，再等 10 秒...")
                         time.sleep(10)
-                        status = check_xunlei_task_status(xunlei, task_id)
+                        status = check_xunlei_task(xunlei, task_id)
                         phase = status["phase"]
                         if phase == "PHASE_TYPE_PENDING":
                             log.warning("迅雷任务仍在排队，放弃")
                             failed.add(t["hash"])
                             qbit.remove_tag(t["hash"], TARGET_LABEL)
                             qbit.add_tag(t["hash"], "迅雷排队超时")
+                            delete_xunlei_task(xunlei, task_id)
                             continue
 
                     # ====== Step 3: 比速观察 ======
                     result = observe_and_compare(xunlei, qbit, task_id, t["hash"])
 
                     if result == "xunlei_faster":
-                        # 迅雷赢 → 删 qBit
                         log.info("🏆 迅雷胜出，删除 qBit 任务")
                         qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
                         qbit.remove_tag(t["hash"], TARGET_LABEL)
 
                     elif result == "qbit_faster":
-                        # qBit 赢 → 删迅雷任务
                         log.info("🏆 qBit 更快，删除迅雷任务，保留 qBit")
-                        try:
-                            xunlei._api_post(f"/drive/v1/tasks?task_ids={task_id}", method="DELETE")
-                            log.info("已删除迅雷任务")
-                        except Exception as e:
-                            log.warning(f"删除迅雷任务失败: {e}")
+                        delete_xunlei_task(xunlei, task_id)
                         qbit.remove_tag(t["hash"], TARGET_LABEL)
                         qbit.add_tag(t["hash"], "qBit更快")
 
                     elif result == "xunlei_failed":
-                        # 迅雷失败 → 保留 qBit
                         log.warning("迅雷任务失败，保留 qBit")
                         failed.add(t["hash"])
                         qbit.remove_tag(t["hash"], TARGET_LABEL)
@@ -442,6 +576,15 @@ def main():
 
                 finally:
                     processing.discard(t["hash"])
+
+            # 清理过期跟踪
+            if ZERO_SPEED_ENABLED:
+                active_qbit = {t["hash"] for t in torrents}
+                try:
+                    active_xl = {t["id"] for t in xunlei.list_tasks("active")}
+                except:
+                    active_xl = set()
+                zero_monitor.cleanup(active_qbit, active_xl)
 
         except KeyboardInterrupt:
             log.info("用户中断，退出")

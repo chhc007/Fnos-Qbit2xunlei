@@ -222,7 +222,8 @@ class XunleiDownloader:
         if extra_params:
             params.update(extra_params)
 
-        url = f"{self.xunlei_base}{path}?{urllib.parse.urlencode(params, doseq=True)}"
+        sep = "&" if "?" in path else "?"
+        url = f"{self.xunlei_base}{path}{sep}{urllib.parse.urlencode(params, doseq=True)}"
         req = urllib.request.Request(url)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
 
@@ -237,7 +238,9 @@ class XunleiDownloader:
         if extra_params:
             params.update(extra_params)
 
-        url = f"{self.xunlei_base}{path}?{urllib.parse.urlencode(params, doseq=True)}"
+        # 处理 path 已带 ? 的情况（如 /drive/v1/tasks?task_ids=xxx）
+        sep = "&" if "?" in path else "?"
+        url = f"{self.xunlei_base}{path}{sep}{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body or {}).encode("utf-8") if body else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
@@ -283,21 +286,23 @@ class XunleiDownloader:
         """
         log.info(f"添加下载任务: {url[:60]}...")
 
+        # 确定下载目录
+        effective_dir = target_dir or self.download_path
+
         body = {
             "type": "user#download-url",
             "name": name or "download",
             "file_name": name or "download",
             "file_size": "0",
+            "space": self.device_space or "",
             "params": {
                 "url": url,
+                "target": self.device_space or "",
             },
         }
 
-        # 优先用传入的 target_dir，其次用默认 download_path
-        if target_dir:
-            body["params"]["target_dir"] = target_dir
-        elif self.download_path:
-            body["params"]["target_dir"] = self.download_path
+        if effective_dir:
+            body["params"]["parent_folder_path"] = effective_dir
 
         try:
             data = self._api_post("/drive/v1/task", body)

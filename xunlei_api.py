@@ -234,7 +234,8 @@ class NasXunleiClient:
         if extra_params:
             params.update(extra_params)
 
-        url = f"{XUNLEI_BASE}{path}?{urllib.parse.urlencode(params, doseq=True)}"
+        sep = "&" if "?" in path else "?"
+        url = f"{XUNLEI_BASE}{path}{sep}{urllib.parse.urlencode(params, doseq=True)}"
         req = urllib.request.Request(url)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci}")
 
@@ -250,7 +251,9 @@ class NasXunleiClient:
         if extra_params:
             params.update(extra_params)
 
-        url = f"{XUNLEI_BASE}{path}?{urllib.parse.urlencode(params, doseq=True)}"
+        # 处理 path 已带 ? 的情况（如 /drive/v1/tasks?task_ids=xxx）
+        sep = "&" if "?" in path else "?"
+        url = f"{XUNLEI_BASE}{path}{sep}{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body or {}).encode("utf-8") if body else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci}")
