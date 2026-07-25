@@ -84,7 +84,7 @@ DELETE_FILES = config.getboolean("general", "DELETE_FILES", fallback=False)
 MAX_CONCURRENT = config.getint("general", "MAX_CONCURRENT", fallback=3)
 
 # 速度比较参数
-SPEED_CHECK_DURATION = 60   # 观察时长（秒）
+SPEED_CHECK_DURATION = 20   # 观察时长（秒）
 SPEED_CHECK_INTERVAL = 10   # 采样间隔（秒）
 INITIAL_WAIT = 10           # 提交后等待迅雷开始的秒数
 MIN_SPEED_BYTES = 1024      # 最低有效速度（1KB/s），低于此视为"没速度"
