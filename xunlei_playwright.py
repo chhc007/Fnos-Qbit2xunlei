@@ -35,6 +35,7 @@ class XunleiPlaywright:
         self.fnos_token = fnos_token
         self.download_path = download_path
         self.filter_files = filter_files
+        self._magnet_cache = {}  # {(任务名, timestamp): 磁力链接}
 
     def add_download(self, magnet: str, name: str = "", max_retry: int = 2) -> bool:
         from playwright.sync_api import sync_playwright
@@ -161,6 +162,11 @@ class XunleiPlaywright:
                         continue
 
                     time.sleep(5)
+
+                    # 缓存磁力链接，供后续任务匹配使用
+                    if name:
+                        self._magnet_cache[name] = {"magnet": magnet, "ts": time.time()}
+                        log.debug(f"已缓存磁力链接: {name[:40]}...")
 
                     browser.close()
                     log.info("Playwright 下载任务提交成功")
@@ -413,6 +419,11 @@ class XunleiPlaywright:
         通过 Playwright 读取迅雷网页上的任务列表。
         返回格式与 API list_tasks 兼容：[{"id", "name", "file_name", "phase", "params": {"speed": ...}}]
         """
+        # 清理超过 1 小时的缓存条目
+        now = time.time()
+        self._magnet_cache = {k: v for k, v in self._magnet_cache.items()
+                              if now - v["ts"] < 3600}
+
         from playwright.sync_api import sync_playwright
 
         try:
@@ -485,12 +496,16 @@ class XunleiPlaywright:
         # 映射 phase
         phase = self._map_phase(status_text)
 
+        # 查缓存获取磁力链接（用于 hash 匹配）
+        cached = self._magnet_cache.get(name)
+        url = cached["magnet"] if cached else ""
+
         return {
             "id": item_id,
             "name": name,
             "file_name": name,
             "phase": phase,
-            "params": {"speed": str(speed)},
+            "params": {"speed": str(speed), "url": url},
         }
 
     @staticmethod
