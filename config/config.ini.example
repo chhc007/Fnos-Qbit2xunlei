@@ -1,61 +1,45 @@
 # qBit → 迅雷 自动转存配置文件
-# 复制此文件为 config.ini 并填写实际值
 
 [qbittorrent]
-# qBittorrent Web UI 地址
 QB_HOST = http://192.168.1.100:8080
 QB_USER = admin
 QB_PASS = adminadmin
 
 [nas]
-# NAS (飞牛 fnOS) 配置
-NAS_HOST = 192.168.123.146
+NAS_HOST = 192.168.1.100
 NAS_PORT = 5666
 NAS_USER = admin
 NAS_PASS = admin
 
 # 迅雷下载路径（留空使用迅雷默认路径）
-# 示例: /vol5/1000/影视库/下载/迅雷下载影视 根据你飞牛上迅雷设定的来
-
 XUNLEI_DOWNLOAD_PATH =
 
-# qBit 保存路径前缀（去除后拼接到迅雷路径）
-# 示例: qBit 任务保存路径是 /downloads/电影/华语电影
-#   QBIT_SAVE_PATH_PREFIX = /downloads
-#   XUNLEI_BASE_PATH = /vol5/1000/影视库/下载/迅雷下载影视
-#   最终迅雷路径 = /vol5/1000/影视库/下载/迅雷下载影视/电影/华语电影
-# 留空则不映射，直接用 XUNLEI_DOWNLOAD_PATH
-
+# qBit 保存路径前缀 → 映射到迅雷路径
+# qBit /downloads/电影/动画电影 → 迅雷 /存储空间5/.../迅雷下载影视/电影/动画电影
 QBIT_SAVE_PATH_PREFIX =
 XUNLEI_BASE_PATH =
 
 [general]
-# qbit检查间隔（秒）
+# --- 基础 ---
 CHECK_INTERVAL = 10
-
-# 触发转存的标签名
 TARGET_LABEL = 迅雷
-
-# 删除 qBit 任务时是否同时删除文件
 DELETE_FILES = false
 
-# 最大同时转存任务数
-MAX_CONCURRENT = 5
+# --- 预检查：先看 qBit 速度，够快就不转迅雷 ---
+# 发现带迅雷标签的任务后，等待这段时间观察 qBit 速度（秒）
+PRE_CHECK_WAIT = 20
+# qBit 平均速度 >= 此值（KB/s）则认为不需要转迅雷，移除标签
+PRE_CHECK_SPEED_THRESHOLD = 2000
 
-# 比速观察时长（秒）
+# --- 转存后比速 ---
 SPEED_CHECK_DURATION = 40
-
-# 比速采样间隔（秒）
-SPEED_CHECK_INTERVAL = 10
-
-# 提交后等待迅雷开始的秒数
+SPEED_CHECK_INTERVAL = 5
 INITIAL_WAIT = 10
-
-# 最低有效速度（bytes/s），低于此视为“没速度”
 MIN_SPEED_BYTES = 50
 
-# 0速度超时自动清理（true/false）自动清理没速度的任务，qbit和迅雷都会。
+# --- 0速度超时清理 --- 清理两个下载器里完全没速度的任务 超时时间单位分钟
 ZERO_SPEED_ENABLED = false
+ZERO_SPEED_TIMEOUT = 120
 
-# 0速度超时（分钟）：下载任务持续0速度超过此时间则自动删除
-ZERO_SPEED_TIMEOUT = 10
+# --- 文件过滤 --- 迅雷下载时过滤非视频和nfo和字幕文件
+FILTER_FILES = true

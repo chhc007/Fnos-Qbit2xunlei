@@ -85,9 +85,16 @@ SPEED_CHECK_INTERVAL = config.getint("general", "SPEED_CHECK_INTERVAL", fallback
 INITIAL_WAIT = config.getint("general", "INITIAL_WAIT", fallback=10)
 MIN_SPEED_BYTES = config.getint("general", "MIN_SPEED_BYTES", fallback=1024)
 
+# 预检查参数
+PRE_CHECK_WAIT = config.getint("general", "PRE_CHECK_WAIT", fallback=30)
+PRE_CHECK_SPEED_THRESHOLD = config.getint("general", "PRE_CHECK_SPEED_THRESHOLD", fallback=500) * 1024  # KB/s → bytes/s
+
 # 0速度超时
 ZERO_SPEED_ENABLED = config.getboolean("general", "ZERO_SPEED_ENABLED", fallback=True)
 ZERO_SPEED_TIMEOUT = config.getint("general", "ZERO_SPEED_TIMEOUT", fallback=10) * 60  # 转为秒
+
+# 文件过滤
+FILTER_FILES = config.getboolean("general", "FILTER_FILES", fallback=False)
 
 log.info("✅ 配置加载完成")
 log.info(f"  qBit: {QB_HOST}")
@@ -95,10 +102,12 @@ log.info(f"  NAS:  {NAS_HOST}:{NAS_PORT}")
 log.info(f"  标签: {TARGET_LABEL}")
 log.info(f"  间隔: {CHECK_INTERVAL}s")
 log.info(f"  比速: {SPEED_CHECK_DURATION}s (每{SPEED_CHECK_INTERVAL}s采样)")
+log.info(f"  预检查: 等待{PRE_CHECK_WAIT}s, 阈值 {PRE_CHECK_SPEED_THRESHOLD // 1024} KB/s")
 if ZERO_SPEED_ENABLED:
     log.info(f"  0速度超时: {ZERO_SPEED_TIMEOUT // 60}分钟")
 else:
     log.info("  0速度超时: 已禁用")
+log.info(f"  文件过滤: {'启用' if FILTER_FILES else '禁用'}")
 
 
 # ============ qBittorrent API ============
@@ -407,6 +416,7 @@ def main():
         nas_user=NAS_USER,
         nas_pass=NAS_PASS,
         download_path=XUNLEI_DOWNLOAD_PATH,
+        filter_files=FILTER_FILES,
     )
 
     log.info("正在初始化迅雷下载器...")
@@ -497,79 +507,149 @@ def main():
                 processing.add(t["hash"])
 
                 try:
+                    # ====== Step 0: 预检查 qBit 速度 ======
+                    if PRE_CHECK_WAIT > 0:
+                        log.info(f"预检查: 等待 {PRE_CHECK_WAIT}s 观察 qBit 速度...")
+                        pre_samples = max(1, PRE_CHECK_WAIT // SPEED_CHECK_INTERVAL)
+                        pre_speeds = []
+                        for si in range(pre_samples):
+                            time.sleep(SPEED_CHECK_INTERVAL)
+                            spd = qbit.get_speed(t["hash"])
+                            pre_speeds.append(spd)
+                            log.info(f"  预检查 [{(si+1)*SPEED_CHECK_INTERVAL}s] qBit: {fmt_speed(spd)}")
+                        avg_pre = sum(pre_speeds) / len(pre_speeds) if pre_speeds else 0
+                        if avg_pre >= PRE_CHECK_SPEED_THRESHOLD:
+                            log.info(f"qBit 平均速度 {fmt_speed(int(avg_pre))} >= 阈值 {fmt_speed(PRE_CHECK_SPEED_THRESHOLD)}，无需转迅雷")
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)
+                            continue
+                        log.info(f"qBit 平均速度 {fmt_speed(int(avg_pre))} < 阈值 {fmt_speed(PRE_CHECK_SPEED_THRESHOLD)}，转迅雷")
+
                     # ====== Step 1: 提交迅雷下载 ======
                     log.info("提交迅雷下载...")
-                    task_id = xunlei.add_download(magnet, name=t["name"], target_dir=target_dir)
+                    result = xunlei.add_download(magnet, name=t["name"], target_dir=target_dir)
 
-                    if not task_id:
-                        log.error("❌ 迅雷任务创建失败")
+                    if not result:
+                        log.error("迅雷任务创建失败")
                         failed.add(t["hash"])
                         qbit.remove_tag(t["hash"], TARGET_LABEL)
                         qbit.add_tag(t["hash"], "迅雷失败")
                         continue
 
-                    log.info(f"迅雷任务已创建: {task_id}")
+                    log.info("迅雷任务已提交")
 
                     # ====== Step 2: 等待迅雷开始下载 ======
                     log.info(f"等待 {INITIAL_WAIT}s 观察迅雷是否开始下载...")
                     time.sleep(INITIAL_WAIT)
 
-                    status = check_xunlei_task(xunlei, task_id)
-                    phase = status["phase"]
-                    log.info(f"迅雷状态: {phase} | 速度: {fmt_speed(status['speed'])}")
+                    # 通过名称查找迅雷任务状态
+                    xl_tasks = xunlei.list_tasks("all")
+                    xl_task = None
+                    for task in xl_tasks:
+                        tname = task.get("file_name", task.get("name", ""))
+                        if tname and t["name"] and t["name"] in tname:
+                            xl_task = task
+                            break
 
-                    # 迅雷失败
-                    if phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
-                        log.warning(f"❌ 迅雷任务失败: {phase}")
-                        failed.add(t["hash"])
-                        qbit.remove_tag(t["hash"], TARGET_LABEL)
-                        qbit.add_tag(t["hash"], "迅雷失败")
-                        delete_xunlei_task(xunlei, task_id)
-                        continue
+                    if xl_task:
+                        phase = xl_task.get("phase", "")
+                        params = xl_task.get("params", {})
+                        speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                        log.info(f"迅雷状态: {phase} | 速度: {fmt_speed(speed)}")
 
-                    # 迅雷已完成（秒下）
-                    if phase == "PHASE_TYPE_COMPLETE":
-                        log.info("✅ 迅雷秒下完成！删除 qBit 任务")
-                        qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
-                        qbit.remove_tag(t["hash"], TARGET_LABEL)
-                        continue
-
-                    # 迅雷排队中
-                    if phase == "PHASE_TYPE_PENDING":
-                        log.info("迅雷任务排队中，再等 10 秒...")
-                        time.sleep(10)
-                        status = check_xunlei_task(xunlei, task_id)
-                        phase = status["phase"]
-                        if phase == "PHASE_TYPE_PENDING":
-                            log.warning("迅雷任务仍在排队，放弃")
+                        if phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
+                            log.warning(f"迅雷任务失败: {phase}")
                             failed.add(t["hash"])
                             qbit.remove_tag(t["hash"], TARGET_LABEL)
-                            qbit.add_tag(t["hash"], "迅雷排队超时")
-                            delete_xunlei_task(xunlei, task_id)
+                            qbit.add_tag(t["hash"], "迅雷失败")
                             continue
 
-                    # ====== Step 3: 比速观察 ======
-                    result = observe_and_compare(xunlei, qbit, task_id, t["hash"])
+                        if phase == "PHASE_TYPE_COMPLETE":
+                            log.info("迅雷秒下完成！删除 qBit 任务")
+                            qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)
+                            continue
+                    else:
+                        log.info("未找到对应迅雷任务，等待更多时间...")
+                        time.sleep(10)
+                        xl_tasks = xunlei.list_tasks("all")
+                        for task in xl_tasks:
+                            tname = task.get("file_name", task.get("name", ""))
+                            if tname and t["name"] and t["name"] in tname:
+                                xl_task = task
+                                break
 
-                    if result == "xunlei_faster":
-                        log.info("🏆 迅雷胜出，删除 qBit 任务")
-                        qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
-                        qbit.remove_tag(t["hash"], TARGET_LABEL)
+                    # ====== Step 3: 比速观察（不依赖 task_id，按名称匹配） ======
+                    log.info(f"开始比速观察 ({SPEED_CHECK_DURATION}s)...")
+                    xunlei_speeds = []
+                    qbit_speeds = []
+                    samples = SPEED_CHECK_DURATION // SPEED_CHECK_INTERVAL
+                    xunlei_task_name = t["name"]
 
-                    elif result == "qbit_faster":
-                        log.info("🏆 qBit 更快，删除迅雷任务，保留 qBit")
-                        delete_xunlei_task(xunlei, task_id)
-                        qbit.remove_tag(t["hash"], TARGET_LABEL)
-                        qbit.add_tag(t["hash"], "qBit更快")
+                    for i in range(samples):
+                        time.sleep(SPEED_CHECK_INTERVAL)
 
-                    elif result == "xunlei_failed":
-                        log.warning("迅雷任务失败，保留 qBit")
-                        failed.add(t["hash"])
-                        qbit.remove_tag(t["hash"], TARGET_LABEL)
-                        qbit.add_tag(t["hash"], "迅雷失败")
+                        # 查迅雷速度（通过名称匹配）
+                        xl_speed = 0
+                        xl_phase = "unknown"
+                        try:
+                            xl_all = xunlei.list_tasks("all")
+                            for task in xl_all:
+                                tname = task.get("file_name", task.get("name", ""))
+                                if tname and xunlei_task_name in tname:
+                                    params = task.get("params", {})
+                                    xl_speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                                    xl_phase = task.get("phase", "")
+                                    break
+                        except Exception as e:
+                            log.debug(f"查询迅雷状态异常: {e}")
+
+                        xunlei_speeds.append(xl_speed)
+                        qb_speed = qbit.get_speed(t["hash"])
+                        qbit_speeds.append(qb_speed)
+
+                        log.info(f"  [{(i+1)*SPEED_CHECK_INTERVAL}s] "
+                                 f"迅雷: {fmt_speed(xl_speed)} | qBit: {fmt_speed(qb_speed)} | "
+                                 f"迅雷: {xl_phase}")
+
+                        if xl_phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
+                            log.warning(f"迅雷任务失败: {xl_phase}")
+                            failed.add(t["hash"])
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)
+                            qbit.add_tag(t["hash"], "迅雷失败")
+                            break
+
+                        if xl_phase == "PHASE_TYPE_COMPLETE":
+                            log.info("迅雷任务已完成")
+                            qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)
+                            break
+                    else:
+                        # 比速结束，比较平均速度
+                        avg_xunlei = sum(xunlei_speeds) / len(xunlei_speeds) if xunlei_speeds else 0
+                        avg_qbit = sum(qbit_speeds) / len(qbit_speeds) if qbit_speeds else 0
+                        log.info(f"平均速度 -> 迅雷: {fmt_speed(int(avg_xunlei))} | qBit: {fmt_speed(int(avg_qbit))}")
+
+                        if avg_xunlei > avg_qbit and avg_xunlei >= MIN_SPEED_BYTES:
+                            log.info("迅雷更快，删除 qBit 任务")
+                            qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)
+                        else:
+                            log.info("qBit 更快或持平，删除迅雷任务")
+                            # 通过名称查找并删除迅雷任务
+                            try:
+                                xl_all = xunlei.list_tasks("all")
+                                for task in xl_all:
+                                    tname = task.get("file_name", task.get("name", ""))
+                                    if tname and xunlei_task_name in tname:
+                                        delete_xunlei_task(xunlei, task.get("id", ""))
+                                        break
+                            except Exception as e:
+                                log.debug(f"删除迅雷任务异常: {e}")
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)
+                            qbit.add_tag(t["hash"], "qBit更快")
 
                 except Exception as e:
-                    log.error(f"❌ 处理异常: {e}")
+                    log.error(f"处理异常: {e}")
                     failed.add(t["hash"])
                     qbit.remove_tag(t["hash"], TARGET_LABEL)
                     qbit.add_tag(t["hash"], "迅雷异常")

@@ -1,130 +1,127 @@
-# 适用于飞牛的qBit → 迅雷 自动转存
+# qBit → 迅雷 自动转存（飞牛 fnOS）
 
-自动将 qBittorrent 中的任务转存到迅雷下载，比速后保留更快的那一个。
+自动将 qBittorrent 中的任务转存到飞牛 NAS 上的迅雷下载，比速后保留更快的那一个。
 
 ## 工作原理
 
 ```
 qBit 任务带"迅雷"标签
         ↓
-  提交到迅雷下载
+  预检查：等 20s 看 qBit 速度
         ↓
-  等待 10s 检查状态
-        ↓
-  ┌─ 失败 → 标记"迅雷失败"，保留 qBit
-  ├─ 秒下完成 → 删除 qBit
-  └─ 开始下载 → 比速 60s
-                  ├─ 迅雷更快 → 删除 qBit
-                  └─ qBit 更快 → 删除迅雷任务
+  ┌─ qBit 速度快（≥2MB/s）→ 移除标签，不转存
+  └─ qBit 速度慢 → 提交到迅雷下载
+                      ↓
+                  等待 10s 检查状态
+                      ↓
+                  ┌─ 失败/版权问题 → 标记"迅雷失败"
+                  ├─ 秒下完成 → 删除 qBit 任务
+                  └─ 开始下载 → 比速 40s
+                                ├─ 迅雷更快 → 删除 qBit
+                                └─ qBit 更快 → 删除迅雷任务
 ```
 
-同时监控所有下载任务（qBit + 迅雷），0 速度超过指定时间自动清理。
+同时支持 0 速度超时自动清理、迅雷端文件过滤（只保留视频/字幕/nfo）。
 
 ## 快速开始
 
 ### 1. 准备配置文件
 
-只需要在nas上准备个目录用来存放配置文件
+在 NAS 上创建一个目录用于存放配置，例如 `/vol4/1000/DockerConfig/fnosqbit2xunlei/config`。
 
-配置文件可以等docker运行之后再去改
+首次运行容器会自动生成 `config.ini`，也可以提前准备好。填写 qBit 和 NAS 的地址、账号密码即可。
 
-填写：
-- qBit Web UI 地址、账号密码
-- NAS 地址、账号密码
+### 2. Docker Compose 部署
 
-其他配置自己看
-
-改完之后重命名为config.ini 重启容器
-
-### 2. Docker 部署
-
-使用compose部署
-[配置示例](docker-compose.yml)
+```yaml
+services:
+  fnosqbit2xunlei:
+    image: chhc007/fnos-qbit2xunlei:latest
+    container_name: fnosqbit2xunlei
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - /vol4/1000/DockerConfig/fnosqbit2xunlei/config:/app/config
+```
 
 ### 3. 使用
 
-在 qBittorrent 中给任务添加 **`迅雷`** 标签，脚本会自动：
-1. 提取磁力链接（含 tracker）
-2. 提交到迅雷下载
-3. 比速决定保留哪个
+在 qBittorrent 中给任务添加 **`迅雷`** 标签，脚本会自动处理。
 
 ## 配置说明
 
-### qBit
+### 连接配置
 
 | 配置项 | 说明 | 示例 |
 |--------|------|------|
-| `QB_HOST` | Web UI 地址 | `http://192.168.1.100:8080` |
-| `QB_USER` | 用户名 | `admin` |
-| `QB_PASS` | 密码 | `adminadmin` |
+| `QB_HOST` | qBit Web UI 地址 | `http://192.168.1.100:8080` |
+| `QB_USER` | qBit 用户名 | `admin` |
+| `QB_PASS` | qBit 密码 | `adminadmin` |
+| `NAS_HOST` | 飞牛 NAS 地址 | `192.168.1.100` |
+| `NAS_PORT` | 飞牛 NAS 端口 | `5666` |
+| `NAS_USER` | NAS 登录账号 | `admin` |
+| `NAS_PASS` | NAS 登录密码 | `password` |
 
-### NAS / 迅雷
+### 迅雷与路径
 
-| 配置项 | 说明 | 示例 |
-|--------|------|------|
-| `NAS_HOST` | NAS 地址 | `192.168.123.146` |
-| `NAS_PORT` | NAS 端口 | `5666` |
-| `NAS_USER` | NAS 账号 | `admin` |
-| `NAS_PASS` | NAS 密码 | `password` |
-| `XUNLEI_DOWNLOAD_PATH` | 迅雷固定下载路径（留空用默认） | `/vol5/1000/影视库/下载` |
+| 配置项 | 说明 |
+|--------|------|
+| `XUNLEI_DOWNLOAD_PATH` | 迅雷下载路径（留空用默认） |
+| `QBIT_SAVE_PATH_PREFIX` | qBit 保存路径前缀（用于路径映射） |
+| `XUNLEI_BASE_PATH` | 映射到迅雷的基础路径 | 
 
-### 路径映射
+路径映射示例：
 
-将 qBit 的保存路径映射到迅雷的下载目录：
-
-```ini
+```
+qBit 保存路径: /downloads/电影/动画电影
 QBIT_SAVE_PATH_PREFIX = /downloads
-XUNLEI_BASE_PATH = /vol5/1000/影视库/下载/迅雷下载影视
+XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
+→ 迅雷下载路径: /存储空间5/.../迅雷下载影视/电影/动画电影 （这里用迅雷看到的目录名称而不是文件夹真实路径）
 ```
 
-| qBit 路径 | 迅雷路径 |
-|-----------|---------|
-| `/downloads/电影/华语电影` | `/vol5/1000/影视库/下载/迅雷下载影视/电影/华语电影` |
-| `/downloads/电视剧` | `/vol5/1000/影视库/下载/迅雷下载影视/电视剧` |
+### 预检查（推荐）
 
-留空则不映射，直接用 `XUNLEI_DOWNLOAD_PATH` 或迅雷默认路径。
+| 配置项 | 说明 | 推荐值 |
+|--------|------|--------|
+| `PRE_CHECK_WAIT` | 观察 qBit 速度的等待时间（秒） | `20` |
+| `PRE_CHECK_SPEED_THRESHOLD` | qBit 速度阈值（KB/s），高于此值不转存 | `2000` |
+
+先看 qBit 速度，如果 qBit 已经够快（如 2MB/s 以上），直接跳过不转迅雷。
 
 ### 比速参数
 
-| 配置项 | 说明 | 默认值 |
+| 配置项 | 说明 | 推荐值 |
 |--------|------|--------|
-| `SPEED_CHECK_DURATION` | 比速观察时长（秒） | `60` |
-| `SPEED_CHECK_INTERVAL` | 采样间隔（秒） | `10` |
+| `SPEED_CHECK_DURATION` | 比速观察时长（秒） | `40` |
+| `SPEED_CHECK_INTERVAL` | 采样间隔（秒） | `5` |
 | `INITIAL_WAIT` | 提交后等待迅雷开始（秒） | `10` |
-| `MIN_SPEED_BYTES` | 最低有效速度（bytes/s） | `1024` |
-
-### 0 速度监控
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `ZERO_SPEED_ENABLED` | 是否启用 0 速度自动清理 | `true` |
-| `ZERO_SPEED_TIMEOUT` | 0 速度超时时间（分钟） | `10` |
-
-监控范围：所有正在下载的 qBit 任务 + 迅雷活跃任务（不限标签）。
+| `MIN_SPEED_BYTES` | 最低有效速度（bytes/s） | `50` |
 
 ### 其他
 
-| 配置项 | 说明 | 默认值 |
+| 配置项 | 说明 | 推荐值 |
 |--------|------|--------|
 | `TARGET_LABEL` | 触发转存的 qBit 标签 | `迅雷` |
-| `CHECK_INTERVAL` | 主循环检查间隔（秒） | `30` |
-| `MAX_CONCURRENT` | 最大同时转存任务数 | `3` |
-| `DELETE_FILES` | 删除 qBit 任务时是否同时删文件 | `false` |
-
-
-
-## 本地运行（不用 Docker）
-
-```bash
-pip install requests websockets
-cp config/config.ini.example config/config.ini
-# 编辑 config.ini
-python3 qbit_to_xunlei.py
-```
+| `CHECK_INTERVAL` | 主循环检查间隔（秒） | `10` |
+| `DELETE_FILES` | 删除 qBit 任务时是否同时删文件 | `true` |
+| `FILTER_FILES` | 迅雷端过滤非视频/字幕/nfo 文件 | `true` |
+| `ZERO_SPEED_ENABLED` | 0 速度超时自动清理 | `false` |
+| `ZERO_SPEED_TIMEOUT` | 0 速度超时时间（分钟） | `120` |
 
 ## 技术细节
 
 - **NAS 登录**: WebSocket (`ws://<nas>:5666/websocket?type=main`)，明文 `user.login`
-- **迅雷认证**: 从迅雷 HTML 页面提取 `pan_auth` JWT（硬编码在页面里）
-- **迅雷 API**: `POST /drive/v1/task` 创建任务，需要 `space` + `target` 参数
-- **磁力链接**: 从 qBit 获取完整 tracker 列表，拼接到磁力链接里
+- **迅雷操作**: 通过 Playwright 无头浏览器直接操作迅雷 Web 界面（SPA 页面），不依赖迅雷 API 创建任务
+- **迅雷 API**: 仅用于查询任务状态（`list_tasks`），创建任务由 Playwright 完成
+- **比速逻辑**: 同时采样 qBit 和迅雷速度，比较平均速度决定保留哪个
+
+## 本地运行
+
+```bash
+pip install requests websockets playwright
+playwright install chromium
+cp config/config.ini.example config/config.ini
+# 编辑 config.ini
+python3 qbit_to_xunlei.py
+```
