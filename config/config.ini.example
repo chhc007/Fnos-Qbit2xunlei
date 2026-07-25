@@ -46,3 +46,6 @@ FILTER_FILES = true
 
 # --- 调试模式 --- 开启后打印所有API请求/响应详情，用于排查问题
 DEBUG = false
+
+# --- 任务读取方式 --- api（默认，通过HTTP接口）或 playwright（通过网页DOM解析，更稳定但较慢）
+TASK_SOURCE = api

@@ -27,7 +27,7 @@ class XunleiDownloader:
 
     def __init__(self, nas_host: str, nas_port: int, nas_user: str, nas_pass: str,
                  download_path: str = "", data_dir: str = None, filter_files: bool = False,
-                 debug: bool = False):
+                 debug: bool = False, task_source: str = "api"):
         self.nas_host = nas_host
         self.nas_port = nas_port
         self.nas_user = nas_user
@@ -35,6 +35,7 @@ class XunleiDownloader:
         self.download_path = download_path
         self.filter_files = filter_files
         self.debug = debug
+        self.task_source = task_source
 
         self.base_url = f"http://{nas_host}:{nas_port}"
         self.xunlei_base = f"{self.base_url}/cgi/ThirdParty/xunlei/index.cgi"
@@ -301,7 +302,26 @@ class XunleiDownloader:
     # ============ 业务功能 ============
 
     def list_tasks(self, status: str = "active") -> List[Dict]:
-        """获取下载任务列表"""
+        """获取下载任务列表（根据 task_source 配置选择 API 或 Playwright）"""
+        if self.task_source == "playwright":
+            return self._list_tasks_playwright()
+        return self._list_tasks_api(status)
+
+    def _list_tasks_playwright(self) -> List[Dict]:
+        """通过 Playwright 读取任务列表"""
+        try:
+            from xunlei_playwright import XunleiPlaywright
+            pw = XunleiPlaywright(
+                xunlei_url=self.xunlei_base,
+                fnos_token=self.fnos_token or "",
+            )
+            return pw.list_tasks()
+        except Exception as e:
+            log.warning(f"Playwright 读取任务失败: {e}")
+            return []
+
+    def _list_tasks_api(self, status: str = "active") -> List[Dict]:
+        """通过 API 读取任务列表"""
         phase_map = {
             "active": "PHASE_TYPE_PENDING,PHASE_TYPE_RUNNING,PHASE_TYPE_PAUSED,PHASE_TYPE_ERROR",
             "completed": "PHASE_TYPE_COMPLETE",

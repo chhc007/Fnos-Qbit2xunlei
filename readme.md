@@ -109,6 +109,7 @@ XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
 | `ZERO_SPEED_ENABLED` | 0 速度超时自动清理 | `false` |
 | `ZERO_SPEED_TIMEOUT` | 0 速度超时时间（分钟） | `120` |
 | `DEBUG` | 调试模式，打印所有 API 请求/响应详情 | `false` |
+| `TASK_SOURCE` | 任务读取方式：`api`（默认）或 `playwright`（更稳定但较慢） | `api` |
 
 ## 技术细节
 
