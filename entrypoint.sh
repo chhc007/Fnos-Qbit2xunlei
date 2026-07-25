@@ -2,20 +2,15 @@
 set -e
 
 CONFIG_DIR="/app/config"
-CONFIG_FILE="$CONFIG_DIR/config.ini"
-EXAMPLE_FILE="$CONFIG_DIR/config.ini.example"
 
-# 如果 config.ini 不存在，从样例复制
-if [ ! -f "$CONFIG_FILE" ]; then
-    if [ -f "$EXAMPLE_FILE" ]; then
-        cp "$EXAMPLE_FILE" "$CONFIG_FILE"
-        echo "[entrypoint] 已从 config.ini.example 生成 config.ini，请修改配置后重启容器"
-        echo "[entrypoint] docker compose restart"
-        exit 0
-    else
-        echo "[entrypoint] 错误: 找不到 config.ini.example"
-        exit 1
-    fi
+mkdir -p "$CONFIG_DIR"
+
+if [ ! -f "$CONFIG_DIR/config.ini" ]; then
+    echo "[entrypoint] 未检测到配置文件，释放示例配置"
+
+    cp /app/config.ini.example "$CONFIG_DIR/config.ini"
+
+    echo "[entrypoint] 已创建 $CONFIG_DIR/config.ini"
 fi
 
-exec python3 -u qbit_to_xunlei.py
+exec python3 /app/qbit_to_xunlei.py
