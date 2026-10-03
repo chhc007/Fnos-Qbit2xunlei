@@ -8,6 +8,7 @@
 """
 
 import json
+import os
 import time
 import logging
 import re
@@ -432,10 +433,10 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     downloader = XunleiDownloader(
-        nas_host="192.168.1.100",
-        nas_port=5666,
-        nas_user="shield",
-        nas_pass="REDACTED_PASSWORD",
+        nas_host=os.environ.get("NAS_HOST", "192.168.1.100"),
+        nas_port=int(os.environ.get("NAS_PORT", "5666")),
+        nas_user=os.environ.get("NAS_USER", "admin"),
+        nas_pass=os.environ.get("NAS_PASS", ""),
     )
 
     if not downloader.init():

@@ -45,6 +45,10 @@ class XunleiPlaywright:
             attempt += 1
             log.info(f"尝试第 {attempt} 次 Playwright 下载...")
 
+            # browser/context 在 with 块内创建；用 try/finally 确保任何异常路径
+            # 都会关闭浏览器，避免残留 chromium 进程（孤儿→僵尸）堆积。
+            browser = None
+            context = None
             try:
                 with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
@@ -80,7 +84,6 @@ class XunleiPlaywright:
 
                     if not task_button:
                         log.error("新建任务按钮未找到")
-                        browser.close()
                         continue
 
                     target.evaluate('(el) => el.scrollIntoView()', task_button)
@@ -109,7 +112,6 @@ class XunleiPlaywright:
                             close_btn = target.query_selector('.nas-task-dialog .el-dialog__headerbtn')
                             if close_btn:
                                 close_btn.click()
-                            browser.close()
                             continue
 
                     # --- 选择下载目录（如有） ---
@@ -158,7 +160,6 @@ class XunleiPlaywright:
                         log.info("点击立即下载，任务已提交")
                     else:
                         log.error("立即下载按钮未找到")
-                        browser.close()
                         continue
 
                     time.sleep(5)
@@ -168,12 +169,24 @@ class XunleiPlaywright:
                         self._magnet_cache[name] = {"magnet": magnet, "ts": time.time()}
                         log.debug(f"已缓存磁力链接: {name[:40]}...")
 
-                    browser.close()
                     log.info("Playwright 下载任务提交成功")
                     return True
 
             except Exception as e:
                 log.warning(f"Playwright 异常: {e}")
+            finally:
+                # 无论成功/失败/超时/continue，都确保浏览器被关闭回收，
+                # 否则 chromium 会成为孤儿进程并累积成僵尸。
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
 
         log.error(f"达到最大重试次数 {max_retry}，任务失败")
         return False
@@ -426,6 +439,8 @@ class XunleiPlaywright:
 
         from playwright.sync_api import sync_playwright
 
+        browser = None
+        context = None
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
@@ -448,7 +463,6 @@ class XunleiPlaywright:
                     page.wait_for_selector('li.task-item.pan-list-item', timeout=5000)
                 except Exception:
                     # 没有任务
-                    browser.close()
                     return []
 
                 task_items = page.query_selector_all('li.task-item.pan-list-item')
@@ -461,13 +475,25 @@ class XunleiPlaywright:
                     except Exception as e:
                         log.debug(f"解析任务项异常: {e}")
 
-                browser.close()
                 log.info(f"Playwright 读取到 {len(tasks)} 个迅雷任务")
                 return tasks
 
         except Exception as e:
             log.warning(f"Playwright 读取任务列表异常: {e}")
             return []
+        finally:
+            # 确保任何路径（含 goto 超时等异常）都关闭浏览器，
+            # 否则 chromium 残留成孤儿进程 → 僵尸累积（本方法每轮循环都会调用）。
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
     def _parse_task_item(self, item) -> dict:
         """解析单个任务 DOM 节点"""
