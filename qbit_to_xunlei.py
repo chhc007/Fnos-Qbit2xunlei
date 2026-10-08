@@ -129,6 +129,11 @@ if ZERO_SPEED_ENABLED:
 else:
     log.info("  0速度超时: 已禁用")
 log.info(f"  文件过滤: {'启用' if FILTER_FILES else '禁用'}")
+if MAX_CONCURRENT_TASKS > 0:
+    log.info(f"  并发限制: 同时 {MAX_CONCURRENT_TASKS} 个（排队轮询 {QUEUE_POLL_INTERVAL}s，"
+             f"最长等待 {QUEUE_MAX_WAIT_MINUTES}min）")
+else:
+    log.info("  并发限制: 不限制")
 log.info(f"  调试模式: {'开启' if DEBUG else '关闭'}")
 log.info(f"  任务读取: {TASK_SOURCE}")
 
