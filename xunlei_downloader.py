@@ -655,9 +655,12 @@ class XunleiDownloader:
         if self.debug:
             log.debug(f"[DEBUG] 创建任务响应: {json.dumps(resp, ensure_ascii=False)[:500]}")
 
-        if resp.get("id") or resp.get("task_id") or resp.get("HttpStatus") == 0:
-            log.info(f"迅雷任务创建成功: id={resp.get('id') or resp.get('task_id')}")
-            return "ok"
+        # 迅雷返回 {"HttpStatus":0, "task": {...}}；任务对象嵌在 task 键下
+        task = resp.get("task") or {}
+        task_id = task.get("id") or resp.get("id") or resp.get("task_id")
+        if task_id or resp.get("HttpStatus") == 0:
+            log.info(f"迅雷任务创建成功: id={task_id}")
+            return task_id or "ok"
         log.error(f"迅雷任务创建被拒绝: {json.dumps(resp, ensure_ascii=False)[:300]}")
         return None
 

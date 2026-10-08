@@ -131,7 +131,7 @@ with mock.patch.object(x, "parse_url", return_value={"list_id": "L1", "resources
      mock.patch.object(x, "_api_post", return_value={"id": "NEWTASK1"}) as m:
     r = x.add_download("magnet:?xt=urn:btih:7a4e", name="测试任务", target_dir="/vol5/x")
     body = m.call_args[0][1]
-    check("返回 ok", r, "ok")
+    check("返回 task id（mock 响应 id）", r, "NEWTASK1")
     check("type", body["type"], "user#download-url")
     check("space=target", body["space"], "device_id#TEST")
     check("params.target", body["params"]["target"], "device_id#TEST")

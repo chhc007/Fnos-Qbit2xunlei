@@ -114,9 +114,19 @@ XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
 ## 技术细节
 
 - **NAS 登录**: WebSocket (`ws://<nas>:5666/websocket?type=main`)，明文 `user.login`
-- **迅雷操作**: 通过 Playwright 无头浏览器直接操作迅雷 Web 界面（SPA 页面），不依赖迅雷 API 创建任务
-- **迅雷 API**: 仅用于查询任务状态（`list_tasks`），创建任务由 Playwright 完成
+- **迅雷操作**: 全部通过 fnOS 迅雷的 HTTP 接口完成，**不需要浏览器**
+  - 解析链接：`POST /drive/v1/resource/list` → 文件树（含 `file_index`）
+  - 创建任务：`POST /drive/v1/task`（`type=user#download-url`）
+  - 查询任务：`GET /drive/v1/tasks`
+  - 删除任务：`DELETE /drive/v1/tasks?space=&task_ids=`
+  - 下载目录：`GET /drive/v1/files`（逐层下钻 → `parent_folder_id`）
+- **设备标识（space/target）**: 运行时从 `/drive/v1/tasks?type=user#runner` 自动获取，形如 `device_id#<md5>`，**不要硬编码**
+- **文件过滤**: 解析出的文件树按 DFS 先序拍平，`file_index` 为文件全局序号；
+  只保留视频/字幕/nfo-txt-jpg-png，其余用 `sub_file_index` 排除；全选传 `-1`
 - **比速逻辑**: 同时采样 qBit 和迅雷速度，比较平均速度决定保留哪个
+
+> `TASK_SOURCE=playwright` 保留旧的浏览器实现（`xunlei_playwright.py`）仅作兜底，
+> 默认 `api` 完全不需要 Playwright/Chromium。
 
 ## 本地运行
 
