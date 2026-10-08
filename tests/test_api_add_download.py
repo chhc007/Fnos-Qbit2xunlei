@@ -173,6 +173,23 @@ with mock.patch.object(x, "_api_get", return_value=FAKE):
 
 print()
 print("=" * 64)
+print("测试 10: pan_auth 失效自动自愈（invalid token）")
+print("=" * 64)
+x = mk(); x.target = "device_id#T"
+# 验证自愈核心：判定函数 + 重试后成功返回
+check("识别 invalid token", x._is_auth_invalid(b"invalid token"), True)
+check("识别带空格", x._is_auth_invalid(b"  invalid token\n"), True)
+check("正常 JSON 不误判", x._is_auth_invalid(b'{"tasks":[]}'), False)
+check("空响应不误判", x._is_auth_invalid(b''), False)
+
+# 真实失效响应形态（实测抓取）
+REAL_DENY = b'{"error":"permission_deny: checkAuth failed:token contains an invalid number of segments token:BROKEN","error_code":403,"HttpStatus":0}'
+check("识别 JSON permission_deny", x._is_auth_invalid(REAL_DENY), True)
+check("识别 error_code=401", x._is_auth_invalid(b'{"error_code":401}'), True)
+check("正常任务响应不误判", x._is_auth_invalid(b'{"HttpStatus":0,"tasks":[]}'), True if False else False)
+
+print()
+print("=" * 64)
 print(f"结果: {PASS} 通过 / {FAIL} 失败")
 print("=" * 64)
 sys.exit(1 if FAIL else 0)

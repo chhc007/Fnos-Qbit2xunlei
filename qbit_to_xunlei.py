@@ -35,7 +35,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from xunlei_downloader import XunleiDownloader
+    from xunlei_downloader import XunleiDownloader, XunleiAuthError
 except ImportError:
     print("❌ 找不到 xunlei_downloader.py，请确保在同一目录")
     sys.exit(1)
@@ -514,6 +514,8 @@ def main():
                             continue
                         if tid and tid not in processing:
                             zero_monitor.check_xunlei_task_by_speed(tid, tname, speed)
+                except XunleiAuthError as e:
+                    log.warning(f"迅雷凭据失效: {e}（已尝试自动刷新，下一轮重试）")
                 except Exception as e:
                     log.debug(f"迅雷任务监控异常: {e}")
 
@@ -557,7 +559,7 @@ def main():
                 # 标记为处理中
                 processing.add(t["hash"])
 
-                # 凭证检查：如果过期则刷新
+                # 凭证检查：如果过期则刷新（_api_* 也会在失效时自动自愈）
                 if not xunlei._test_auth():
                     log.warning("凭证已过期，刷新中...")
                     xunlei.init()

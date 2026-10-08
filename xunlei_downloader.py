@@ -23,6 +23,10 @@ from typing import Optional, List, Dict
 log = logging.getLogger("xunlei")
 
 
+class XunleiAuthError(Exception):
+    """迅雷凭据（pan_auth）失效且刷新失败"""
+
+
 class XunleiDownloader:
     """迅雷下载器（纯 HTTP 版本）"""
 
@@ -215,6 +219,25 @@ class XunleiDownloader:
 
     # ============ 设备空间（target / space）============
 
+    def _relogin(self) -> bool:
+        """
+        重新获取 fnos-token 与 pan_auth（pan_auth 约 1 小时过期）。
+
+        返回 True 表示刷新成功。用于 API 调用检测到 "invalid token" 时自动自愈。
+        """
+        log.warning("pan_auth 失效，重新登录 NAS 刷新凭据...")
+        try:
+            self.fnos_token = self._ws_login()
+            self.pan_auth = self._get_pan_auth()
+        except Exception as e:
+            log.error(f"刷新凭据失败: {e}")
+            return False
+        self._save_cred()
+        if not self.target:
+            self.target = self._resolve_device_target()
+        log.info("凭据已刷新")
+        return True
+
     def _resolve_device_target(self) -> str:
         """
         解析迅雷"空间"标识（space / target）。
@@ -280,8 +303,9 @@ class XunleiDownloader:
                 log.debug(f"[DEBUG] _test_pan_auth GET {url}")
             req = urllib.request.Request(url)
             req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI=")
-            resp = self.opener.open(req, timeout=10)
-            body = resp.read()
+            body = self._open(req)
+            if self._is_auth_invalid(body):
+                return False
             data = json.loads(body)
             if self.debug:
                 log.debug(f"[DEBUG] _test_pan_auth 响应: {json.dumps(data, ensure_ascii=False)[:500]}")
@@ -291,7 +315,7 @@ class XunleiDownloader:
                 log.debug(f"[DEBUG] _test_pan_auth 异常: {e}")
             return False
 
-    def _api_get(self, path: str, extra_params: dict = None) -> dict:
+    def _api_get(self, path: str, extra_params: dict = None, _retry: bool = True) -> dict:
         params = {
             "pan_auth": self.pan_auth,
             "device_space": "",
@@ -306,13 +330,20 @@ class XunleiDownloader:
         req = urllib.request.Request(url)
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
 
-        resp = self.opener.open(req, timeout=30)
-        body = resp.read()
+        body = self._open(req)
         if self.debug:
-            log.debug(f"[DEBUG] API GET 响应 (HTTP {resp.status}): {body.decode('utf-8', errors='replace')[:500]}")
+            log.debug(f"[DEBUG] API GET 响应: {body.decode('utf-8', errors='replace')[:500]}")
+
+        # pan_auth 失效时迅雷返回 403 或纯文本 "invalid token"。
+        # 此时自动重新登录并重试一次，避免监控循环被刷屏报错。
+        if self._is_auth_invalid(body):
+            if _retry and self._relogin():
+                return self._api_get(path, extra_params, _retry=False)
+            raise XunleiAuthError("pan_auth 失效且刷新失败")
         return json.loads(body)
 
-    def _api_post(self, path: str, body: dict = None, extra_params: dict = None, method: str = "POST") -> dict:
+    def _api_post(self, path: str, body: dict = None, extra_params: dict = None,
+                  method: str = "POST", _retry: bool = True) -> dict:
         params = {
             "pan_auth": self.pan_auth,
             "device_space": "",
@@ -332,11 +363,60 @@ class XunleiDownloader:
         req.add_header("Cookie", f"fnos-token={self.fnos_token}; XLA_CI={self.xla_ci or ''}")
         req.add_header("Content-Type", "application/json")
 
-        resp = self.opener.open(req, timeout=30)
-        body = resp.read()
+        body_bytes = self._open(req)
         if self.debug:
-            log.debug(f"[DEBUG] API {method} 响应 (HTTP {resp.status}): {body.decode('utf-8', errors='replace')[:500]}")
-        return json.loads(body)
+            log.debug(f"[DEBUG] API {method} 响应: {body_bytes.decode('utf-8', errors='replace')[:500]}")
+
+        if self._is_auth_invalid(body_bytes):
+            if _retry and self._relogin():
+                return self._api_post(path, body, extra_params, method, _retry=False)
+            raise XunleiAuthError("pan_auth 失效且刷新失败")
+        return json.loads(body_bytes)
+
+    def _open(self, req) -> bytes:
+        """
+        统一发起请求。
+
+        pan_auth 失效时迅雷返回 HTTP 401/403（响应体可能为空或纯文本 "invalid token"）。
+        这里把这类响应体返回给调用方（而不是抛异常），以便自动刷新凭据后重试。
+        """
+        try:
+            resp = self.opener.open(req, timeout=30)
+            return resp.read()
+        except urllib.error.HTTPError as e:
+            body = e.read() if hasattr(e, "read") else b""
+            if e.code in (401, 403):
+                return body if body.strip() else b"invalid token"
+            raise
+
+    @staticmethod
+    def _is_auth_invalid(body: bytes) -> bool:
+        """
+        判断响应是否为凭据失效。
+
+        迅雷实际返回 HTTP 200 + JSON，形如：
+          {"error":"permission_deny: checkAuth failed:token contains an invalid
+           number of segments token:xxx","error_code":403,"HttpStatus":0}
+        兼容纯文本 "invalid token" 与 HTTP 401/403。
+        """
+        try:
+            text = body.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return False
+        if text == "invalid token" or text.startswith("invalid token"):
+            return True
+        if not text.startswith("{"):
+            return False
+        try:
+            data = json.loads(text)
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        if data.get("error_code") in (401, 403):
+            return True
+        err = str(data.get("error") or "")
+        return "checkAuth failed" in err or "permission_deny" in err
 
     # ============ 业务功能 ============
 
