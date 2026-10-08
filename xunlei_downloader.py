@@ -518,6 +518,10 @@ class XunleiDownloader:
 
         逐层下钻：从迅雷的根下载目录里找到与目标路径前缀匹配的那个，
         再按剩余路径片段逐级匹配子目录。
+
+        注意：返回值必须是「真实存在的那个目录」，id 与 path 必须一一对应。
+        中途某级不存在时回退到上一级，并返回该级的真实路径（而非请求路径），
+        否则会出现 id/path 不一致导致迅雷把文件放到意料之外的位置。
         """
         if not path:
             return "", ""
@@ -540,6 +544,7 @@ class XunleiDownloader:
             a_segs = [s for s in alias.strip("/").split("/") if s]
             if a_segs and segs[:len(a_segs)] == a_segs:
                 cur_id = r.get("id")
+                cur_path = "/" + "/".join(a_segs)   # 真实已解析路径
                 remaining = segs[len(a_segs):]
                 log.info(f"匹配根目录: {alias} → id={cur_id}，剩余子目录 {remaining}")
                 for seg in remaining:
@@ -547,18 +552,20 @@ class XunleiDownloader:
                         children = self._list_folders(cur_id)
                     except Exception as e:
                         log.warning(f"列出子目录失败: {e}")
-                        return "", ""
+                        break
                     nxt = None
                     for c in children:
                         cname = (c.get("name") or "").rstrip("/").split("/")[-1]
                         if cname == seg:
-                            nxt = c.get("id")
+                            nxt = c
                             break
                     if not nxt:
-                        log.warning(f"子目录 '{seg}' 未找到，回退到上级目录")
+                        log.warning(f"子目录 '{seg}' 不存在，回退到 {cur_path}")
                         break
-                    cur_id = nxt
-                return cur_id, path
+                    cur_id = nxt.get("id")
+                    np = (nxt.get("params") or {}).get("AliasPath")
+                    cur_path = np.rstrip("/") if np else f"{cur_path}/{seg}"
+                return cur_id, cur_path
 
         # 没匹配到根目录：留空用迅雷默认目录
         log.warning(f"未匹配到下载根目录，使用迅雷默认目录（目标: {path}）")
