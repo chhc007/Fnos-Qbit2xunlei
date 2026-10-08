@@ -53,11 +53,21 @@ class XunleiDownloader:
         self.xla_ci: Optional[str] = None
         self.pan_auth: Optional[str] = None
         self.device_space: str = ""
+        # 迅雷"空间"标识（= 设备 target），形如 device_id#<md5>。
+        # 运行时从 /drive/v1/tasks?type=user#runner 自动获取，绝不硬编码。
+        self.target: str = ""
+        self.device_name: str = ""
 
         self.video_extensions = {
             '.mkv', '.mp4', '.avi', '.rmvb', '.rm', '.wmv', '.flv',
             '.mov', '.ts', '.m4v', '.webm', '.vob', '.mpg', '.mpeg',
-            '.3gp', '.f4v', '.ogv', '.nfo', '.str'
+            '.3gp', '.f4v', '.ogv', '.iso',
+        }
+        self.subtitle_extensions = {
+            '.srt', '.ass', '.ssa', '.sub', '.idx', '.sup',
+        }
+        self.info_extensions = {
+            '.nfo', '.txt', '.jpg', '.jpeg', '.png',
         }
 
     # ============ 凭据管理 ============
@@ -170,11 +180,13 @@ class XunleiDownloader:
         1. 尝试加载已保存的凭据
         2. 验证凭据有效性
         3. 如果无效，通过纯 HTTP/WebSocket 获取
+        4. 解析设备 target（space）
         """
         if self._load_saved():
             log.info("已加载保存的凭据，验证中...")
             if self._test_auth():
                 log.info("凭据有效")
+                self.target = self._resolve_device_target()
                 return True
             log.warning("凭据已过期，重新获取...")
 
@@ -198,7 +210,32 @@ class XunleiDownloader:
 
         self._save_cred()
         log.info("凭据获取并保存成功")
+        self.target = self._resolve_device_target()
         return True
+
+    # ============ 设备空间（target / space）============
+
+    def _resolve_device_target(self) -> str:
+        """
+        解析迅雷"空间"标识（space / target）。
+
+        取值来源是设备注册任务（type=user#runner）的 params.target，
+        形如 device_id#<md5>；不可硬编码（每台设备不同）。
+        """
+        try:
+            data = self._api_get("/drive/v1/tasks", {"type": "user#runner", "limit": "20"})
+        except Exception as e:
+            log.warning(f"获取设备信息失败: {e}")
+            return ""
+        for t in data.get("tasks", []):
+            params = t.get("params") or {}
+            target = params.get("target") or ""
+            if target:
+                self.device_name = t.get("name", "") or ""
+                log.info(f"迅雷设备: {self.device_name} ({target})")
+                return target
+        log.warning("未找到迅雷设备注册信息（target 为空）")
+        return ""
 
     # ============ API 调用 ============
 
@@ -235,6 +272,7 @@ class XunleiDownloader:
             params = {
                 "pan_auth": self.pan_auth,
                 "device_space": "",
+                "space": self.target or "",
                 "type": "user#runner",
             }
             url = f"{self.xunlei_base}/drive/v1/tasks?{urllib.parse.urlencode(params)}"
@@ -334,8 +372,11 @@ class XunleiDownloader:
             filters["phase"] = {"in": phase_map[status]}
         filters["type"] = {"in": "user#download-url,user#download"}
 
+        # 注意：space 必须用设备真实 target（device_id#...），
+        # 早前代码硬编码的 device_id#8d84... 属于另一台设备，
+        # 会导致读回"别人的"任务列表（比速阶段匹配不到任务）。
         params = {
-            "space": self.device_space or "device_id#8d842bc20de9d63e49eb0cc7ebaea16e",
+            "space": self.target or "",
             "limit": "100",
             "filters": json.dumps(filters),
             "type": "user#download-url,user#download",
@@ -344,9 +385,191 @@ class XunleiDownloader:
         data = self._api_get("/drive/v1/tasks", params)
         return data.get("tasks", [])
 
+    # ============ 链接解析 / 文件树 ============
+
+    def parse_url(self, url: str) -> Optional[Dict]:
+        """
+        解析磁力/下载链接，返回文件树（纯 API，等价于网页"确定解析链接"）。
+
+        返回: {"list_id": str, "resources": [...]} 或 None
+        """
+        try:
+            data = self._api_post("/drive/v1/resource/list",
+                                  {"urls": url, "page_size": 2000})
+        except Exception as e:
+            log.error(f"解析链接失败: {e}")
+            return None
+
+        resources = (data.get("list") or {}).get("resources") or []
+        if not resources:
+            log.error("解析结果为空（链接无效或已被迅雷拒绝）")
+            return None
+
+        # 大种子分页：顶层首个资源带 dir.next_page_token 时继续拉取
+        first = resources[0] if resources else {}
+        d = first.get("dir") or {}
+        token = d.get("next_page_token")
+        list_id = data.get("list_id") or ""
+        while token and list_id:
+            try:
+                page = self._api_get(f"/drive/v1/resource/list/{list_id}",
+                                     {"page_token": token})
+            except Exception as e:
+                log.warning(f"分页拉取文件树失败: {e}")
+                break
+            res = (page.get("list") or {}).get("resources") or []
+            if not res:
+                break
+            d["resources"] = (d.get("resources") or []) + res
+            token = (page.get("list") or {}).get("next_page_token") or ""
+        return {"list_id": list_id, "resources": resources}
+
+    @staticmethod
+    def _is_dir_node(node: Dict) -> bool:
+        return bool(node.get("is_dir")) or \
+            (node.get("meta") or {}).get("mime_type") == "dir" or \
+            node.get("kind") == "drive#folder"
+
+    def flatten_resources(self, resources: List[Dict]) -> List[Dict]:
+        """
+        按 DFS 先序拍平文件树。
+
+        关键：迅雷的 file_index 是「文件在整个种子中的全局顺序（从 0 起）」，
+        与网页端 flatten 结果一致；首个文件可能缺省 file_index（= 0）。
+        """
+        out: List[Dict] = []
+
+        def walk(nodes: List[Dict], root_id: str):
+            for n in nodes:
+                out.append(n)
+                d = n.get("dir") or {}
+                if d.get("resources"):
+                    walk(d["resources"], root_id)
+
+        for top in resources:
+            walk([top], top.get("id") or "")
+        return out
+
+    @staticmethod
+    def _ext(filename: str) -> str:
+        idx = str(filename or "").rfind(".")
+        return str(filename)[idx:].lower() if idx >= 0 else ""
+
+    def select_file_indices(self, flat: List[Dict]) -> Optional[List[int]]:
+        """
+        计算要下载的文件 file_index 列表（等价于网页端勾选文件）。
+
+        规则（与 xunlei_playwright 的 _filter_files 完全一致）：
+          - 视频 / 字幕 / 信息文件（nfo/txt/jpg/png）保留
+          - 其余取消勾选
+          - 没有任何视频文件 → 返回 None（放弃该任务）
+
+        filter_files=False 时全部保留。
+        """
+        files = [n for n in flat if not self._is_dir_node(n)]
+        if not files:
+            return None
+
+        video_count = 0
+        selected: List[int] = []
+        for global_idx, node in enumerate(files):
+            # 迅雷返回的 file_index 即全局序号；缺省视为 0
+            fi = node.get("file_index")
+            fi = global_idx if fi in (None, "") else int(fi)
+            name = node.get("name") or node.get("file_name") or ""
+            ext = self._ext(name)
+            if ext in self.video_extensions:
+                video_count += 1
+                selected.append(fi)
+                continue
+            if not self.filter_files:
+                selected.append(fi)
+                continue
+            if ext in self.subtitle_extensions or ext in self.info_extensions:
+                selected.append(fi)
+                continue
+            # 其它格式：过滤掉
+
+        log.info(f"文件解析: 共 {len(files)} 个文件，视频 {video_count} 个，"
+                 f"选中 {len(selected)} 个")
+        if self.filter_files and video_count == 0:
+            log.warning("没有视频文件，放弃此任务")
+            return None
+        return selected
+
+    # ============ 下载目录 ============
+
+    def _list_folders(self, parent_id: str = "") -> List[Dict]:
+        """列出指定父目录下的文件夹（纯 API）"""
+        params = {
+            "space": self.target or "",
+            "limit": "200",
+            "parent_id": parent_id,
+            "filters": json.dumps({"kind": {"eq": "drive#folder"}}),
+            "with": "withCategoryDiskMountPath,withCategoryDownloadPath",
+        }
+        data = self._api_get("/drive/v1/files", params)
+        return data.get("files", []) or []
+
+    def _resolve_download_dir(self, path: str) -> tuple:
+        """
+        把 NAS 路径解析为迅雷的 (parent_folder_id, parent_folder_path)。
+
+        逐层下钻：从迅雷的根下载目录里找到与目标路径前缀匹配的那个，
+        再按剩余路径片段逐级匹配子目录。
+        """
+        if not path:
+            return "", ""
+        segs = [s for s in path.strip("/").split("/") if s]
+        if not segs:
+            return "", ""
+
+        try:
+            roots = self._list_folders("")
+        except Exception as e:
+            log.warning(f"获取下载根目录失败: {e}")
+            return "", ""
+
+        # 找前缀匹配的根目录（别名路径优先）
+        for r in roots:
+            p = r.get("params") or {}
+            alias = (p.get("AliasPath") or r.get("name") or "").rstrip("/")
+            if not alias:
+                continue
+            a_segs = [s for s in alias.strip("/").split("/") if s]
+            if a_segs and segs[:len(a_segs)] == a_segs:
+                cur_id = r.get("id")
+                remaining = segs[len(a_segs):]
+                log.info(f"匹配根目录: {alias} → id={cur_id}，剩余子目录 {remaining}")
+                for seg in remaining:
+                    try:
+                        children = self._list_folders(cur_id)
+                    except Exception as e:
+                        log.warning(f"列出子目录失败: {e}")
+                        return "", ""
+                    nxt = None
+                    for c in children:
+                        cname = (c.get("name") or "").rstrip("/").split("/")[-1]
+                        if cname == seg:
+                            nxt = c.get("id")
+                            break
+                    if not nxt:
+                        log.warning(f"子目录 '{seg}' 未找到，回退到上级目录")
+                        break
+                    cur_id = nxt
+                return cur_id, path
+
+        # 没匹配到根目录：留空用迅雷默认目录
+        log.warning(f"未匹配到下载根目录，使用迅雷默认目录（目标: {path}）")
+        return "", ""
+
+    # ============ 添加任务 ============
+
     def add_download(self, url: str, name: str = "", target_dir: str = "") -> Optional[str]:
         """
-        添加下载任务（通过 Playwright 操作迅雷 Web 界面）
+        添加下载任务（纯 API，不再依赖浏览器）
+
+        等价于网页端：新建任务 → 填链接 → 确定解析 → 勾选文件 → 选目录 → 立即下载
 
         参数:
             url: 磁力链接或 HTTP 下载链接
@@ -355,10 +578,93 @@ class XunleiDownloader:
 
         返回: "ok" 或 None
         """
-        log.info(f"添加下载任务: {url[:60]}...")
+        log.info(f"添加下载任务(API): {url[:60]}...")
 
+        # TASK_SOURCE=playwright 时保留旧的浏览器实现（兜底用）
+        if self.task_source == "playwright":
+            return self._add_download_playwright(url, name, target_dir)
+
+        if not self.target:
+            self.target = self._resolve_device_target()
+        if not self.target:
+            log.error("缺少迅雷设备标识(target)，无法创建任务")
+            return None
+
+        # --- Step 1: 解析链接 ---
+        parsed = self.parse_url(url)
+        if not parsed:
+            return None
+        flat = self.flatten_resources(parsed["resources"])
+        files = [n for n in flat if not self._is_dir_node(n)]
+
+        # --- Step 2: 文件过滤 ---
+        indices = self.select_file_indices(flat)
+        if indices is None:
+            return None
+
+        # --- Step 3: 下载目录 ---
         effective_dir = target_dir or self.download_path
+        parent_folder_id, parent_folder_path = self._resolve_download_dir(effective_dir)
 
+        # --- Step 4: 组装并提交 ---
+        top = parsed["resources"][0] if parsed["resources"] else {}
+        meta = top.get("meta") or {}
+        first_file = files[0] if files else {}
+        first_meta = first_file.get("meta") or {}
+
+        task_name = name or top.get("name") or first_file.get("name") or "unnamed"
+        task_name = str(task_name).strip().replace("\n", "")
+        file_name = str(top.get("name") or first_file.get("name") or task_name).strip()
+        file_size = str(top.get("file_size") or first_file.get("file_size") or 0)
+        total_file_count = len(files)
+
+        params: Dict = {
+            "url": url,
+            "target": self.target,
+            "total_file_count": str(total_file_count),
+            "mime_type": (meta.get("mime_type") or first_meta.get("mime_type") or ""),
+        }
+        # 单文件任务不传 sub_file_index（与网页端一致）
+        if total_file_count > 1:
+            if len(indices) == total_file_count:
+                params["sub_file_index"] = "-1"
+            else:
+                params["sub_file_index"] = ",".join(str(i) for i in indices)
+        if parent_folder_id:
+            params["parent_folder_id"] = parent_folder_id
+            params["parent_folder_path"] = parent_folder_path
+
+        body = {
+            "type": "user#download-url",
+            "name": task_name,
+            "file_name": file_name,
+            "file_size": file_size,
+            "space": self.target,
+            "params": params,
+        }
+
+        if self.debug:
+            log.debug(f"[DEBUG] 创建任务请求体: {json.dumps(body, ensure_ascii=False)[:800]}")
+
+        try:
+            resp = self._api_post("/drive/v1/task", body)
+        except Exception as e:
+            log.error(f"创建任务失败: {e}")
+            return None
+
+        if self.debug:
+            log.debug(f"[DEBUG] 创建任务响应: {json.dumps(resp, ensure_ascii=False)[:500]}")
+
+        if resp.get("id") or resp.get("task_id") or resp.get("HttpStatus") == 0:
+            log.info(f"迅雷任务创建成功: id={resp.get('id') or resp.get('task_id')}")
+            return "ok"
+        log.error(f"迅雷任务创建被拒绝: {json.dumps(resp, ensure_ascii=False)[:300]}")
+        return None
+
+    def _add_download_playwright(self, url: str, name: str = "",
+                                 target_dir: str = "") -> Optional[str]:
+        """旧的浏览器实现（TASK_SOURCE=playwright 时启用，仅作兜底）"""
+        effective_dir = target_dir or self.download_path
         try:
             from xunlei_playwright import XunleiPlaywright
             pw = XunleiPlaywright(
@@ -367,8 +673,7 @@ class XunleiDownloader:
                 download_path=effective_dir,
                 filter_files=self.filter_files,
             )
-            success = pw.add_download(url, name=name)
-            if success:
+            if pw.add_download(url, name=name):
                 log.info("Playwright 下载任务提交成功")
                 return "ok"
             log.error("Playwright 下载任务提交失败")

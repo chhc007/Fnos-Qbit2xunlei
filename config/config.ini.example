@@ -47,5 +47,7 @@ FILTER_FILES = true
 # --- 调试模式 --- 开启后打印所有API请求/响应详情，用于排查问题
 DEBUG = false
 
-# --- 任务读取方式 --- api（默认，通过HTTP接口）或 playwright（通过网页DOM解析，更稳定但较慢）
+# --- 任务读取/创建方式 ---
+# api（默认，推荐）：全部走迅雷 HTTP 接口，快且无浏览器依赖
+# playwright：旧实现，用无头浏览器操作网页（已废弃，仅作兜底）
 TASK_SOURCE = api

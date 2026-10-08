@@ -291,9 +291,12 @@ def check_xunlei_task(xunlei: XunleiDownloader, task_id: str) -> dict:
 
 
 def delete_xunlei_task(xunlei: XunleiDownloader, task_id: str):
-    """删除迅雷任务"""
+    """删除迅雷任务（需带 space，与网页端一致）"""
     try:
-        xunlei._api_post(f"/drive/v1/tasks?task_ids={task_id}", method="DELETE")
+        space = xunlei.target or ""
+        xunlei._api_post(
+            f"/drive/v1/tasks?space={urllib.parse.quote(space)}&task_ids={task_id}",
+            method="DELETE")
         log.info(f"已删除迅雷任务: {task_id[:16]}...")
     except Exception as e:
         log.warning(f"删除迅雷任务失败: {e}")
