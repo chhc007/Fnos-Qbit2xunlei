@@ -360,30 +360,31 @@ class XunleiDownloader:
             return []
 
     def _list_tasks_api(self, status: str = "active") -> List[Dict]:
-        """通过 API 读取任务列表"""
-        phase_map = {
-            "active": "PHASE_TYPE_PENDING,PHASE_TYPE_RUNNING,PHASE_TYPE_PAUSED,PHASE_TYPE_ERROR",
-            "completed": "PHASE_TYPE_COMPLETE",
-            "all": "",
-        }
+        """
+        通过 API 读取任务列表。
 
-        filters = {}
-        if status in phase_map and phase_map[status]:
-            filters["phase"] = {"in": phase_map[status]}
-        filters["type"] = {"in": "user#download-url,user#download"}
-
-        # 注意：space 必须用设备真实 target（device_id#...），
-        # 早前代码硬编码的 device_id#8d84... 属于另一台设备，
-        # 会导致读回"别人的"任务列表（比速阶段匹配不到任务）。
+        实测坑（2026-10-08 在真机验证）：
+          - 顶层 `type` 参数用逗号多值（如 "a,b"）会返回 0 条；只有单值可用。
+          - `filters` 里 `phase.in` 用逗号多值同样返回 0 条。
+        因此这里只按 `filters.type.in` 过滤（实测 76 条正常），
+        相位过滤一律放到本地做，保证结果稳定。
+        """
         params = {
             "space": self.target or "",
             "limit": "100",
-            "filters": json.dumps(filters),
-            "type": "user#download-url,user#download",
+            "filters": json.dumps({"type": {"in": "user#download-url,user#download"}}),
         }
-
         data = self._api_get("/drive/v1/tasks", params)
-        return data.get("tasks", [])
+        tasks = data.get("tasks", [])
+
+        if status == "active":
+            active = {"PHASE_TYPE_PENDING", "PHASE_TYPE_RUNNING", "PHASE_TYPE_PAUSED",
+                      "PHASE_TYPE_ERROR"}
+            tasks = [t for t in tasks if t.get("phase") in active]
+        elif status == "completed":
+            tasks = [t for t in tasks if t.get("phase") == "PHASE_TYPE_COMPLETE"]
+        # status == "all" → 原样返回
+        return tasks
 
     # ============ 链接解析 / 文件树 ============
 

@@ -157,6 +157,22 @@ with mock.patch.object(x, "parse_url", return_value={"list_id": "L1", "resources
 
 print()
 print("=" * 64)
+print("测试 9: list_tasks 相位过滤（本地过滤，避免 API 逗号多值返回 0 条）")
+print("=" * 64)
+x = mk(); x.target = "device_id#T"
+FAKE = {"tasks": [
+    {"id": "1", "phase": "PHASE_TYPE_RUNNING"},
+    {"id": "2", "phase": "PHASE_TYPE_PENDING"},
+    {"id": "3", "phase": "PHASE_TYPE_COMPLETE"},
+    {"id": "4", "phase": "PHASE_TYPE_ERROR"},
+]}
+with mock.patch.object(x, "_api_get", return_value=FAKE):
+    check("all 返回全部", [t["id"] for t in x._list_tasks_api("all")], ["1","2","3","4"])
+    check("active 只留未完成", [t["id"] for t in x._list_tasks_api("active")], ["1","2","4"])
+    check("completed 只留完成", [t["id"] for t in x._list_tasks_api("completed")], ["3"])
+
+print()
+print("=" * 64)
 print(f"结果: {PASS} 通过 / {FAIL} 失败")
 print("=" * 64)
 sys.exit(1 if FAIL else 0)
