@@ -16,6 +16,7 @@ qBittorrent → 迅雷 自动转存脚本
 import os
 import re
 import sys
+import json
 import time
 import logging
 import configparser
@@ -102,6 +103,15 @@ DEBUG = config.getboolean("general", "DEBUG", fallback=False)
 
 # 任务读取方式
 TASK_SOURCE = config.get("general", "TASK_SOURCE", fallback="api")
+
+# 并发限制（迅雷「同时下载任务数」上限）
+# 迅雷同时下载任务数有上限，超出会排队；排队任务 speed=0，
+# 若不加区分会被误判为「卡死」而删除。此值即上限，0=不限制。
+MAX_CONCURRENT_TASKS = config.getint("general", "MAX_CONCURRENT_TASKS", fallback=0)
+# 队列轮询间隔（秒）：迅雷任务满时，隔多久再看一次是否有空位
+QUEUE_POLL_INTERVAL = config.getint("general", "QUEUE_POLL_INTERVAL", fallback=30)
+# 排队任务最长等待时间（分钟），超时则放弃转存并保留 qBit 任务
+QUEUE_MAX_WAIT_MINUTES = config.getint("general", "QUEUE_MAX_WAIT_MINUTES", fallback=60)
 
 if DEBUG:
     logging.getLogger().setLevel(logging.DEBUG)
@@ -270,6 +280,55 @@ def find_xunlei_task(xl_tasks, qbit_hash, qbit_name):
     return None
 
 
+def get_task_speed(task: dict) -> int:
+    """从迅雷任务对象取速度（bytes/s）"""
+    params = task.get("params", {}) if isinstance(task, dict) else {}
+    try:
+        return int(params.get("speed", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def is_task_queued(task: dict) -> bool:
+    """
+    判断迅雷任务是否处于「排队等待」状态（尚未真正开始下载）。
+
+    背景：迅雷有「同时下载任务数」上限（客户端侧 task_run_nums_limit）。
+    超出上限的新任务会停在排队状态 —— 表现为 phase=PHASE_TYPE_PENDING 且 speed=0，
+    与「真正开始下载但暂时无速度」的任务无法用 speed 区分。
+
+    判定依据（实测）：
+      - 真正下载中：phase=PHASE_TYPE_RUNNING，且 params.status={"phase":"running"}
+      - 排队中    ：phase=PHASE_TYPE_PENDING，params.status 为空或 phase 非 running
+      - 暂停      ：params.status={"phase":"pause"}
+
+    注意：这些任务绝不能被当作「0 速度」删除，否则会造成丢任务 + 反复重试。
+    """
+    if not isinstance(task, dict):
+        return False
+    phase = task.get("phase", "")
+    if phase == "PHASE_TYPE_PENDING":
+        return True
+    if phase != "PHASE_TYPE_RUNNING":
+        return False
+    # RUNNING 但尚未进入实际下载（status 里没有 running 标记）→ 视为排队
+    params = task.get("params", {}) or {}
+    raw = params.get("status")
+    if not raw:
+        return True
+    try:
+        st = json.loads(raw) if isinstance(raw, str) else raw
+        return st.get("phase") != "running"
+    except (ValueError, TypeError):
+        return True
+
+
+def count_active_xunlei_tasks(xl_tasks) -> int:
+    """统计迅雷当前「占用并发位」的任务数（下载中 + 排队中）"""
+    return sum(1 for t in xl_tasks
+               if t.get("phase") in ("PHASE_TYPE_RUNNING", "PHASE_TYPE_PENDING"))
+
+
 # ============ 迅雷任务状态检查 ============
 
 def check_xunlei_task(xunlei: XunleiDownloader, task_id: str) -> dict:
@@ -411,12 +470,18 @@ class ZeroSpeedMonitor:
                   f"剩余 {fmt_duration(int(remaining))}")
         return False
 
-    def check_xunlei_task_by_speed(self, task_id: str, name: str, speed: int) -> bool:
-        """检查迅雷任务（直接传入速度），返回 True 表示已处理（删除）"""
+    def check_xunlei_task_by_speed(self, task_id: str, name: str, speed: int,
+                                   queued: bool = False) -> bool:
+        """
+        检查迅雷任务（直接传入速度），返回 True 表示已处理（删除）
+
+        queued=True 表示该任务处于「排队等待」（受同时下载数限制），
+        此时不计入 0 速度跟踪 —— 否则排队任务会被误判为卡死而删除。
+        """
         key = f"xunlei:{task_id}"
 
-        # 有速度 → 清除跟踪
-        if speed > 0:
+        # 排队中 或 有速度 → 清除跟踪（都不算卡死）
+        if queued or speed > 0:
             self.tracking.pop(key, None)
             return False
 
@@ -507,8 +572,11 @@ def main():
                         if phase not in ("PHASE_TYPE_RUNNING", "PHASE_TYPE_PENDING"):
                             continue
                         tname = task.get("file_name", task.get("name", "unknown"))
-                        params = task.get("params", {})
-                        speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                        speed = get_task_speed(task)
+                        # 排队中的任务不计入 0 速度跟踪（受同时下载数限制，并非卡死）
+                        if is_task_queued(task):
+                            zero_monitor.tracking.pop(f"xunlei:{tid}", None)
+                            continue
                         if speed > 0:
                             zero_monitor.tracking.pop(f"xunlei:{tid}", None)
                             continue
@@ -582,6 +650,36 @@ def main():
                             continue
                         log.info(f"qBit 平均速度 {fmt_speed(int(avg_pre))} < 阈值 {fmt_speed(PRE_CHECK_SPEED_THRESHOLD)}，转迅雷")
 
+                    # ====== Step 0.5: 并发位检查（迅雷同时下载数上限）======
+                    # 迅雷超出「同时下载任务数」的任务会排队，排队任务 speed=0。
+                    # 这里先确认有空闲并发位，避免提交后立刻进入排队状态被误判。
+                    if MAX_CONCURRENT_TASKS > 0:
+                        wait_start = time.time()
+                        max_wait = QUEUE_MAX_WAIT_MINUTES * 60
+                        timed_out = False
+                        while True:
+                            try:
+                                cur = xunlei.list_tasks("all")
+                                active = count_active_xunlei_tasks(cur)
+                            except Exception as e:
+                                log.warning(f"查询迅雷并发占用失败: {e}，直接尝试提交")
+                                break
+                            if active < MAX_CONCURRENT_TASKS:
+                                log.info(f"并发位充足: {active}/{MAX_CONCURRENT_TASKS}，提交迅雷")
+                                break
+                            if time.time() - wait_start >= max_wait:
+                                log.warning(
+                                    f"⏳ 迅雷并发已满 {active}/{MAX_CONCURRENT_TASKS}，"
+                                    f"等待超过 {QUEUE_MAX_WAIT_MINUTES} 分钟，"
+                                    f"本轮跳过（保留 qBit 任务与标签，下轮重试）")
+                                timed_out = True
+                                break
+                            log.info(f"⏳ 迅雷并发已满 {active}/{MAX_CONCURRENT_TASKS}，"
+                                     f"等待 {QUEUE_POLL_INTERVAL}s 后重试...")
+                            time.sleep(QUEUE_POLL_INTERVAL)
+                        if timed_out:
+                            continue
+
                     # ====== Step 1: 提交迅雷下载 ======
                     log.info("提交迅雷下载...")
                     result = xunlei.add_download(magnet, name=t["name"], target_dir=target_dir)
@@ -605,9 +703,10 @@ def main():
 
                     if xl_task:
                         phase = xl_task.get("phase", "")
-                        params = xl_task.get("params", {})
-                        speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
-                        log.info(f"迅雷状态: {phase} | 速度: {fmt_speed(speed)}")
+                        speed = get_task_speed(xl_task)
+                        queued = is_task_queued(xl_task)
+                        log.info(f"迅雷状态: {phase} | 速度: {fmt_speed(speed)}"
+                                 + ("（排队等待中）" if queued else ""))
 
                         if phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
                             log.warning(f"迅雷任务失败: {phase}")
@@ -621,6 +720,46 @@ def main():
                             qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
                             qbit.remove_tag(t["hash"], TARGET_LABEL)
                             continue
+
+                        # 排队等待：给迅雷时间排到队（不参与比速，避免被误删）
+                        if queued:
+                            log.info("迅雷任务排队中，等待其开始下载（不计入比速）...")
+                            queued_start = time.time()
+                            queue_max = QUEUE_MAX_WAIT_MINUTES * 60
+                            while True:
+                                time.sleep(QUEUE_POLL_INTERVAL)
+                                xl_all = xunlei.list_tasks("all")
+                                matched = find_xunlei_task(xl_all, t["hash"], t["name"])
+                                if not matched:
+                                    log.warning("排队任务消失，按失败处理")
+                                    failed.add(t["hash"])
+                                    qbit.remove_tag(t["hash"], TARGET_LABEL)
+                                    qbit.add_tag(t["hash"], "迅雷异常")
+                                    break
+                                if matched.get("phase") in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
+                                    log.warning(f"迅雷任务失败: {matched.get('phase')}")
+                                    failed.add(t["hash"])
+                                    qbit.remove_tag(t["hash"], TARGET_LABEL)
+                                    qbit.add_tag(t["hash"], "迅雷失败")
+                                    break
+                                if matched.get("phase") == "PHASE_TYPE_COMPLETE":
+                                    log.info("迅雷任务已完成，删除 qBit 任务")
+                                    qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
+                                    qbit.remove_tag(t["hash"], TARGET_LABEL)
+                                    break
+                                if not is_task_queued(matched):
+                                    log.info(f"迅雷已开始下载: {fmt_speed(get_task_speed(matched))}，"
+                                             f"进入比速")
+                                    break
+                                if time.time() - queued_start >= queue_max:
+                                    log.warning(
+                                        f"⏳ 迅雷排队超过 {QUEUE_MAX_WAIT_MINUTES} 分钟仍未开始，"
+                                        f"放弃本次转存（保留 qBit 任务与标签，下轮重试）")
+                                    break
+                                log.info(f"迅雷仍在排队... 已等待 "
+                                         f"{fmt_duration(int(time.time() - queued_start))}")
+                            # 排队分支已处理完毕，跳过本轮后续比速
+                            continue
                     else:
                         log.info("未找到对应迅雷任务，等待更多时间...")
                         time.sleep(10)
@@ -631,6 +770,7 @@ def main():
                     log.info(f"开始比速观察 ({SPEED_CHECK_DURATION}s)...")
                     xunlei_speeds = []
                     qbit_speeds = []
+                    queued_samples = 0
                     samples = SPEED_CHECK_DURATION // SPEED_CHECK_INTERVAL
 
                     for i in range(samples):
@@ -639,23 +779,29 @@ def main():
                         # 查迅雷速度（通过 hash/名称匹配）
                         xl_speed = 0
                         xl_phase = "unknown"
+                        xl_queued = False
                         try:
                             xl_all = xunlei.list_tasks("all")
                             matched = find_xunlei_task(xl_all, t["hash"], t["name"])
                             if matched:
-                                params = matched.get("params", {})
-                                xl_speed = int(params.get("speed", 0)) if isinstance(params, dict) else 0
+                                xl_speed = get_task_speed(matched)
                                 xl_phase = matched.get("phase", "")
+                                xl_queued = is_task_queued(matched)
                         except Exception as e:
                             log.debug(f"查询迅雷状态异常: {e}")
 
-                        xunlei_speeds.append(xl_speed)
+                        # 排队样本不参与速度统计（排队必然 speed=0，会拉低均值导致误判）
+                        if xl_queued:
+                            queued_samples += 1
+                        else:
+                            xunlei_speeds.append(xl_speed)
                         qb_speed = qbit.get_speed(t["hash"])
                         qbit_speeds.append(qb_speed)
 
                         log.info(f"  [{(i+1)*SPEED_CHECK_INTERVAL}s] "
                                  f"迅雷: {fmt_speed(xl_speed)} | qBit: {fmt_speed(qb_speed)} | "
-                                 f"迅雷: {xl_phase}")
+                                 f"迅雷: {xl_phase}"
+                                 + ("（排队中，不计入）" if xl_queued else ""))
 
                         if xl_phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAIL"):
                             log.warning(f"迅雷任务失败: {xl_phase}")
@@ -673,9 +819,17 @@ def main():
                         # 比速结束，比较平均速度
                         avg_xunlei = sum(xunlei_speeds) / len(xunlei_speeds) if xunlei_speeds else 0
                         avg_qbit = sum(qbit_speeds) / len(qbit_speeds) if qbit_speeds else 0
-                        log.info(f"平均速度 -> 迅雷: {fmt_speed(int(avg_xunlei))} | qBit: {fmt_speed(int(avg_qbit))}")
+                        log.info(f"平均速度 -> 迅雷: {fmt_speed(int(avg_xunlei))} | "
+                                 f"qBit: {fmt_speed(int(avg_qbit))} "
+                                 f"(排队样本 {queued_samples}/{samples})")
 
-                        if avg_xunlei > avg_qbit and avg_xunlei >= MIN_SPEED_BYTES:
+                        # 保护：迅雷从未真正开始下载（全程排队）→ 不删迅雷任务，
+                        # 保留 qBit 任务与标签，等下一轮继续（避免丢任务）
+                        if queued_samples == samples or not xunlei_speeds:
+                            log.warning("迅雷全程处于排队状态，无法比速；"
+                                        "保留 qBit 任务与标签，下轮重试")
+                            qbit.remove_tag(t["hash"], TARGET_LABEL)  # 摘掉以免重复处理
+                        elif avg_xunlei > avg_qbit and avg_xunlei >= MIN_SPEED_BYTES:
                             log.info("迅雷更快，删除 qBit 任务")
                             qbit.delete_torrent(t["hash"], delete_files=DELETE_FILES)
                             qbit.remove_tag(t["hash"], TARGET_LABEL)

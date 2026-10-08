@@ -108,8 +108,26 @@ XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
 | `FILTER_FILES` | 迅雷端过滤非视频/字幕/nfo 文件 | `true` |
 | `ZERO_SPEED_ENABLED` | 0 速度超时自动清理 | `false` |
 | `ZERO_SPEED_TIMEOUT` | 0 速度超时时间（分钟） | `120` |
+| `MAX_CONCURRENT_TASKS` | 迅雷同时下载数上限，超出则排队等待（0=不限制） | `0` |
+| `QUEUE_POLL_INTERVAL` | 并发已满时的轮询间隔（秒） | `30` |
+| `QUEUE_MAX_WAIT_MINUTES` | 排队最长等待（分钟），超时跳过本轮 | `60` |
 | `DEBUG` | 调试模式，打印所有 API 请求/响应详情 | `false` |
 | `TASK_SOURCE` | 任务读取方式：`api`（默认）或 `playwright`（更稳定但较慢） | `api` |
+
+### 并发限制（重要）
+
+迅雷有「**同时下载任务数**」上限。批量转存整季连续剧时，若一口气提交几十个任务，
+超出的任务会**排队等待**（表现为 `phase=PHASE_TYPE_PENDING`、`speed=0`）。
+
+本程序已针对该场景做了保护：
+
+- **排队任务不会被误判**：排队状态与「下载中但暂时无速度」被明确区分
+  （依据 `params.status.phase`），不会进入 0 速度清理，也不会在比速中
+  被判为「qBit 更快」而删除。
+- **提交前检查并发位**：设置 `MAX_CONCURRENT_TASKS` 后，活动任务数
+  （下载中+排队中）达到上限时会先等待有空位再提交，避免堆积排队。
+- **超时保护**：排队超过 `QUEUE_MAX_WAIT_MINUTES` 仍未开始，则跳过本轮
+  并保留 qBit 任务与标签，下一轮继续尝试 —— 不会丢任务。
 
 ## 技术细节
 
