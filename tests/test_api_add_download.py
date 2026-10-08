@@ -190,6 +190,54 @@ check("正常任务响应不误判", x._is_auth_invalid(b'{"HttpStatus":0,"tasks
 
 print()
 print("=" * 64)
+print("测试 11: 视频体积过滤（MIN_VIDEO_SIZE_MB）")
+print("=" * 64)
+MB = 1024 * 1024
+def mkfile(name, size, idx):
+    n = {"id": f"F{idx}", "name": name, "file_size": size, "file_count": 1,
+         "meta": {"hash": "H", "mime_type": "video/x-matroska", "status": "1"}}
+    if idx is not None:
+        n["file_index"] = idx
+    return n
+
+# 混合场景：正片 2GB / 小样片 0.5MB / 字幕 30KB / nfo 1KB / 广告 .doc 10KB
+MIX = [
+    mkfile("movie.mkv", 2 * 1024 * MB, 0),
+    mkfile("sample.mkv", int(0.5 * MB), 1),          # 小于 1MB → 应过滤
+    mkfile("movie.srt", 30 * 1024, 2),               # 字幕 → 保留（不受体积限制）
+    mkfile("info.nfo", 1024, 3),                     # nfo → 保留
+    mkfile("ad.DOC", 10 * 1024, 4),                  # 非视频 → 过滤
+    mkfile("trailer.mp4", int(0.9 * MB), 5),         # 小于 1MB → 应过滤
+]
+x = mk(); x.filter_files = True
+x.min_video_size_mb = 0
+check("不启用体积过滤 → 全部视频保留", x.select_file_indices(MIX), [0, 1, 2, 3, 5])
+x.min_video_size_mb = 1
+check("1MB 阈值 → 过滤 sample/trailer，保留正片+字幕+nfo",
+      x.select_file_indices(MIX), [0, 2, 3])
+
+# 边界：恰好等于阈值应保留
+B = [mkfile("a.mkv", 1 * MB, 0), mkfile("b.mkv", MB - 1, 1)]
+x.min_video_size_mb = 1
+check("恰好 1MB 保留、1MB-1 过滤", x.select_file_indices(B), [0])
+
+# 全部视频都太小 → 放弃任务
+S = [mkfile("tiny1.mkv", int(0.3 * MB), 0), mkfile("tiny2.mp4", int(0.5 * MB), 1)]
+check("视频全部过小 → None", x.select_file_indices(S), None)
+
+# 字幕只有几十 KB，不应被体积过滤误伤
+SUB = [mkfile("m.mkv", 500 * MB, 0), mkfile("m.ass", 20 * 1024, 1)]
+check("字幕不受体积限制", x.select_file_indices(SUB), [0, 1])
+
+# file_size 缺失/非法时不误删
+BAD = [{"id": "F0", "name": "x.mkv", "file_count": 1,
+        "meta": {"hash": "H", "mime_type": "video/x-matroska"}},
+       {"id": "F1", "name": "y.mkv", "file_size": "abc", "file_count": 1,
+        "meta": {"hash": "H", "mime_type": "video/x-matroska"}}]
+check("file_size 缺失/非法 → 保守保留", x.select_file_indices(BAD), [0, 1])
+
+print()
+print("=" * 64)
 print(f"结果: {PASS} 通过 / {FAIL} 失败")
 print("=" * 64)
 sys.exit(1 if FAIL else 0)

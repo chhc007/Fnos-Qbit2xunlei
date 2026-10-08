@@ -97,6 +97,9 @@ ZERO_SPEED_TIMEOUT = config.getint("general", "ZERO_SPEED_TIMEOUT", fallback=10)
 
 # 文件过滤
 FILTER_FILES = config.getboolean("general", "FILTER_FILES", fallback=False)
+# 视频最小体积（MB）：小于该值的视频文件不下载（0=不过滤）
+# 仅对视频生效，字幕/nfo 等小文件不受影响
+MIN_VIDEO_SIZE_MB = config.getfloat("general", "MIN_VIDEO_SIZE_MB", fallback=0)
 
 # 调试模式
 DEBUG = config.getboolean("general", "DEBUG", fallback=False)
@@ -129,6 +132,8 @@ if ZERO_SPEED_ENABLED:
 else:
     log.info("  0速度超时: 已禁用")
 log.info(f"  文件过滤: {'启用' if FILTER_FILES else '禁用'}")
+if FILTER_FILES and MIN_VIDEO_SIZE_MB > 0:
+    log.info(f"  视频体积下限: {MIN_VIDEO_SIZE_MB} MB（仅视频，字幕/nfo 不受影响）")
 if MAX_CONCURRENT_TASKS > 0:
     log.info(f"  并发限制: 同时 {MAX_CONCURRENT_TASKS} 个（排队轮询 {QUEUE_POLL_INTERVAL}s，"
              f"最长等待 {QUEUE_MAX_WAIT_MINUTES}min）")
@@ -538,6 +543,7 @@ def main():
         filter_files=FILTER_FILES,
         debug=DEBUG,
         task_source=TASK_SOURCE,
+        min_video_size_mb=MIN_VIDEO_SIZE_MB,
     )
 
     log.info("正在初始化迅雷下载器...")

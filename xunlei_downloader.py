@@ -32,7 +32,8 @@ class XunleiDownloader:
 
     def __init__(self, nas_host: str, nas_port: int, nas_user: str, nas_pass: str,
                  download_path: str = "", data_dir: str = None, filter_files: bool = False,
-                 debug: bool = False, task_source: str = "api"):
+                 debug: bool = False, task_source: str = "api",
+                 min_video_size_mb: float = 0):
         self.nas_host = nas_host
         self.nas_port = nas_port
         self.nas_user = nas_user
@@ -41,6 +42,9 @@ class XunleiDownloader:
         self.filter_files = filter_files
         self.debug = debug
         self.task_source = task_source
+        # 视频文件最小体积（MB）：低于此值的视频文件不下载（0=不过滤）
+        # 仅作用于视频；字幕/nfo 等小文件不受影响
+        self.min_video_size_mb = float(min_video_size_mb or 0)
 
         self.base_url = f"http://{nas_host}:{nas_port}"
         self.xunlei_base = f"{self.base_url}/cgi/ThirdParty/xunlei/index.cgi"
@@ -540,10 +544,11 @@ class XunleiDownloader:
         """
         计算要下载的文件 file_index 列表（等价于网页端勾选文件）。
 
-        规则（与 xunlei_playwright 的 _filter_files 完全一致）：
+        规则（与 xunlei_playwright 的 _filter_files 完全一致，另加体积过滤）：
           - 视频 / 字幕 / 信息文件（nfo/txt/jpg/png）保留
+          - 视频文件小于 MIN_VIDEO_SIZE_MB 时跳过（如样片、花絮小片段）
           - 其余取消勾选
-          - 没有任何视频文件 → 返回 None（放弃该任务）
+          - 没有任何「合格」视频文件 → 返回 None（放弃该任务）
 
         filter_files=False 时全部保留。
         """
@@ -551,8 +556,10 @@ class XunleiDownloader:
         if not files:
             return None
 
+        min_bytes = int(self.min_video_size_mb * 1024 * 1024)
         video_count = 0
         selected: List[int] = []
+        skipped_small: List[str] = []
         for global_idx, node in enumerate(files):
             # 迅雷返回的 file_index 即全局序号；缺省视为 0
             fi = node.get("file_index")
@@ -560,6 +567,15 @@ class XunleiDownloader:
             name = node.get("name") or node.get("file_name") or ""
             ext = self._ext(name)
             if ext in self.video_extensions:
+                # 体积过滤：仅对视频生效（字幕/nfo 通常只有几十 KB，不应被误伤）
+                size = node.get("file_size")
+                try:
+                    size = int(size) if size not in (None, "") else 0
+                except (TypeError, ValueError):
+                    size = 0
+                if min_bytes > 0 and 0 < size < min_bytes:
+                    skipped_small.append(f"{name} ({size / 1024 / 1024:.2f}MB)")
+                    continue
                 video_count += 1
                 selected.append(fi)
                 continue
@@ -571,10 +587,15 @@ class XunleiDownloader:
                 continue
             # 其它格式：过滤掉
 
+        if skipped_small:
+            log.info(f"体积过滤: 跳过 {len(skipped_small)} 个小于 "
+                     f"{self.min_video_size_mb}MB 的视频文件")
+            for s in skipped_small[:5]:
+                log.info(f"    ✂ {s}")
         log.info(f"文件解析: 共 {len(files)} 个文件，视频 {video_count} 个，"
                  f"选中 {len(selected)} 个")
         if self.filter_files and video_count == 0:
-            log.warning("没有视频文件，放弃此任务")
+            log.warning("没有符合条件（体积/格式）的视频文件，放弃此任务")
             return None
         return selected
 

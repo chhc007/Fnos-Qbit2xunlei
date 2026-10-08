@@ -106,6 +106,7 @@ XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
 | `CHECK_INTERVAL` | 主循环检查间隔（秒） | `10` |
 | `DELETE_FILES` | 删除 qBit 任务时是否同时删文件 | `true` |
 | `FILTER_FILES` | 迅雷端过滤非视频/字幕/nfo 文件 | `true` |
+| `MIN_VIDEO_SIZE_MB` | 视频体积下限（MB），小于此值的视频不下载（0=不过滤，**仅视频**） | `0` |
 | `ZERO_SPEED_ENABLED` | 0 速度超时自动清理 | `false` |
 | `ZERO_SPEED_TIMEOUT` | 0 速度超时时间（分钟） | `120` |
 | `MAX_CONCURRENT_TASKS` | 迅雷同时下载数上限，超出则排队等待（0=不限制） | `0` |
@@ -113,6 +114,20 @@ XUNLEI_BASE_PATH = /存储空间5/.../迅雷下载影视
 | `QUEUE_MAX_WAIT_MINUTES` | 排队最长等待（分钟），超时跳过本轮 | `60` |
 | `DEBUG` | 调试模式，打印所有 API 请求/响应详情 | `false` |
 | `TASK_SOURCE` | 任务读取方式：`api`（默认）或 `playwright`（更稳定但较慢） | `api` |
+
+### 文件过滤规则
+
+`FILTER_FILES = true` 时，只下载以下文件，其余（如广告 .doc/.url、推广图）全部排除：
+
+- **视频**：`.mkv .mp4 .avi .rmvb .rm .wmv .flv .mov .ts .m4v .webm .vob .mpg .mpeg .3gp .f4v .ogv .iso`
+- **字幕**：`.srt .ass .ssa .sub .idx .sup`
+- **信息**：`.nfo .txt .jpg .jpeg .png`
+
+另有**体积下限** `MIN_VIDEO_SIZE_MB`：小于该值的**视频**文件不下载
+（用于过滤样片、花絮小片段、广告短片）。注意它**只作用于视频** ——
+字幕/nfo 往往只有几十 KB，不会被误伤。
+
+> 若过滤后没有任何合格视频，整个任务会被放弃（不会创建迅雷任务）。
 
 ### 并发限制（重要）
 
