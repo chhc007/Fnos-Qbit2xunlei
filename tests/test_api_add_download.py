@@ -238,6 +238,55 @@ check("file_size 缺失/非法 → 保守保留", x.select_file_indices(BAD), [0
 
 print()
 print("=" * 64)
+print("测试 12: 任务名称为哈希占位时改用迅雷解析名")
+print("=" * 64)
+check("识别 40 位哈希", x._is_hash_name("d6edfe6e9dc2e1a5d5d4b02139da5752e4bf587f"), True)
+check("识别 32 位哈希", x._is_hash_name("a" * 32), True)
+check("大写哈希也识别", x._is_hash_name("A" * 40), True)
+check("带空格哈希", x._is_hash_name("  " + "a" * 40 + "  "), True)
+check("正常名称不误判", x._is_hash_name("飞鹰计划.Operation.Condor.1991"), False)
+check("含中文不误判", x._is_hash_name("熟男不結婚"), False)
+check("空串不误判", x._is_hash_name(""), False)
+check("None 不误判", x._is_hash_name(None), False)
+check("31 位不算哈希", x._is_hash_name("a" * 31), False)
+check("含非十六进制不算", x._is_hash_name("g" * 40), False)
+
+# 端到端：qBit 传来哈希名 → 任务名应为迅雷解析名
+HASH = "d6edfe6e9dc2e1a5d5d4b02139da5752e4bf587f"
+RESOLVED = "[MagicStar] Kekkon Dekinai Otoko [WEBDL] [1080p]"
+FIX = [{
+    "id": "T.0", "name": RESOLVED, "file_size": 43504918594, "file_count": 2,
+    "meta": {"bt_infohash": HASH, "url": f"magnet:?xt=urn:btih:{HASH}"},
+    "is_dir": True,
+    "dir": {"resources": [
+        file_node("EP01.mkv", "T.0.0", None),
+        file_node("EP02.mkv", "T.0.1", 1),
+    ]},
+}]
+x = mk(); x.filter_files = True; x.target = "device_id#T"
+with mock.patch.object(x, "parse_url", return_value={"list_id": "L", "resources": FIX}), \
+     mock.patch.object(x, "_resolve_download_dir", return_value=("", "")), \
+     mock.patch.object(x, "_api_post", return_value={"task": {"id": "NEW"}}) as m:
+    x.add_download(f"magnet:?xt=urn:btih:{HASH}", name=HASH)
+    body = m.call_args[0][1]
+    check("任务名改用迅雷解析名", body["name"], RESOLVED)
+    check("file_name 同步修正", body["file_name"], RESOLVED)
+
+# 正常名称应保持原样（不被覆盖）
+NORMAL = [{
+    "id": "T.0", "name": "迅雷解析名X", "file_size": 1000, "file_count": 1,
+    "meta": {}, "is_dir": True,
+    "dir": {"resources": [file_node("a.mkv", "T.0.0", None)]},
+}]
+with mock.patch.object(x, "parse_url", return_value={"list_id": "L", "resources": NORMAL}), \
+     mock.patch.object(x, "_resolve_download_dir", return_value=("", "")), \
+     mock.patch.object(x, "_api_post", return_value={"task": {"id": "N"}}) as m:
+    x.add_download("magnet:?xt=urn:btih:abc", name="qBit正常名")
+    body = m.call_args[0][1]
+    check("正常名称优先于解析名", body["name"], "qBit正常名")
+
+print()
+print("=" * 64)
 print(f"结果: {PASS} 通过 / {FAIL} 失败")
 print("=" * 64)
 sys.exit(1 if FAIL else 0)

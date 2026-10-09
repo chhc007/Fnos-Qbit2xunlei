@@ -674,6 +674,17 @@ class XunleiDownloader:
 
     # ============ 添加任务 ============
 
+    @staticmethod
+    def _is_hash_name(s) -> bool:
+        """
+        判断名称是否只是哈希占位名。
+
+        qBit 在种子元数据下载完成前（metaDL 状态）返回的 name 就是 infohash，
+        此时不能用它作为任务名，否则迅雷里会显示成 40 位十六进制串。
+        """
+        s = str(s or "").strip()
+        return bool(re.fullmatch(r"[0-9a-fA-F]{32,64}", s))
+
     def add_download(self, url: str, name: str = "", target_dir: str = "") -> Optional[str]:
         """
         添加下载任务（纯 API，不再依赖浏览器）
@@ -721,9 +732,25 @@ class XunleiDownloader:
         first_file = files[0] if files else {}
         first_meta = first_file.get("meta") or {}
 
-        task_name = name or top.get("name") or first_file.get("name") or "unnamed"
+        # 任务名优先级：调用方名称 > 迅雷解析名 > 首个文件名
+        # 注意：qBit 在 metaDL 阶段返回的 name 是 infohash，必须丢弃，
+        # 否则迅雷任务会显示成 40 位哈希（用户看到的就是"乱码"）。
+        resolved_name = top.get("name") or first_file.get("name") or ""
+        if name and not self._is_hash_name(name):
+            task_name = name
+        elif resolved_name and not self._is_hash_name(resolved_name):
+            task_name = resolved_name
+            if name and self._is_hash_name(name):
+                log.info(f"传入名称为哈希占位，改用迅雷解析名: {str(task_name)[:60]}")
+        else:
+            task_name = name or resolved_name or "unnamed"
         task_name = str(task_name).strip().replace("\n", "")
-        file_name = str(top.get("name") or first_file.get("name") or task_name).strip()
+
+        # file_name 同理：优先用迅雷解析出的真实文件名
+        if resolved_name and not self._is_hash_name(resolved_name):
+            file_name = str(resolved_name).strip()
+        else:
+            file_name = str(name or resolved_name or task_name).strip()
         file_size = str(top.get("file_size") or first_file.get("file_size") or 0)
         total_file_count = len(files)
 
